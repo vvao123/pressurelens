@@ -2,8 +2,10 @@ export const runtime = "edge";
 
 export async function POST(req: Request) {
   const { text, level } = await req.json();
-//   const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
-const OPENAI_API_KEY = "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";
+  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+  if (!OPENAI_API_KEY) {
+    return new Response(JSON.stringify({ error: 'OpenAI API key not configured.' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
   const prompt = level === "light"
     ? `请用一句话简单定义或解释："${text}"`
     : level === "medium"
