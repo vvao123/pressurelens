@@ -1,12 +1,35 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { createWorker, Worker } from "tesseract.js";
+import { recognizeWordsFromCanvas, WordBBox } from "../lib/ocr/tesseract";
+import * as THREE from "three";
+import { sessionLogger } from "../lib/logging/sessionLogger";
+import { getNearestOcrWord } from "../lib/logging/nearestWord";
+import type { PointerSampleInput, VoiceAnnotation, NearestWordInfo } from "../lib/logging/types";
+import VoiceTopicRecorder from "../components/VoiceTopicRecorder";
 
 type Level = "light" | "medium" | "hard";
 
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
+  const threeCanvasRef = useRef<HTMLCanvasElement>(null); // Three.js渲染canvas
+  const threeRendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const threeSceneRef = useRef<THREE.Scene | null>(null);
+  const threeCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const threePivotRef = useRef<THREE.Object3D | null>(null);
+  const threeMeshRef = useRef<THREE.Mesh | null>(null);
+  const threeTextureRef = useRef<THREE.VideoTexture | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const threePivotBaseYRef = useRef<number>(0); // 记录顶部轴心的基准Y
+  const shaderUniformsRef = useRef<{ u_map: { value: THREE.Texture | null }; u_comp: { value: number } } | null>(null);
+  const [warpCompensation, setWarpCompensation] = useState<number>(0.5); // 0~0.5 建议范围，0为关闭
+  // 用 ref 保存最新的 warpCompensation，避免 MediaPipe 回调里闭包拿到旧值
+  const warpCompensationRef = useRef<number>(warpCompensation);
+  const offscreenRendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const captureLockRef = useRef<boolean>(false);
+  const ocrOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   
   // 长按检测的ref，避免频繁setState
   const longPressRef = useRef({
@@ -35,11 +58,138 @@ export default function Home() {
   const [isStreaming, setIsStreaming] = useState<boolean>(false); // 是否启用流式显示
   const [isProcessing, setIsProcessing] = useState<boolean>(false); // 防止重复处理
   const [isEnhancementEnabled, setIsEnhancementEnabled] = useState<boolean>(false); // 是否启用图像增强
-  const [videoScale, setVideoScale] = useState<number>(1); // 视频缩放比例
+  const [videoScale, setVideoScale] = useState<number>(1.49); // 视频缩放比例
   const [videoTranslate, setVideoTranslate] = useState<{x: number, y: number}>({x: 0, y: 0}); // 视频平移位置
   const [floatingResponse, setFloatingResponse] = useState<{text: string, position: {x: number, y: number}} | null>(null); // 浮窗响应
   const [isDraggingFloat, setIsDraggingFloat] = useState<boolean>(false); // 是否正在拖拽浮窗
-  const [perspectiveStrength, setPerspectiveStrength] = useState<number>(0); // 透视强度 0-100
+  const [perspectiveStrength, setPerspectiveStrength] = useState<number>(67); // 透视强度 0-100
+
+  const [webglScreenshot, setWebglScreenshot] = useState<string>(""); // WebGL截图结果
+
+  // OCR 选区结果（主页）
+  const [ocrWordsInRegion, setOcrWordsInRegion] = useState<WordBBox[] | null>(null);
+  const [ocrRegion, setOcrRegion] = useState<{left: number; top: number; width: number; height: number} | null>(null);
+  const [ocrScale, setOcrScale] = useState<number>(2);
+  const [regionCapturedImage, setRegionCapturedImage] = useState<string>("");
+  const [regionRecognizedText, setRegionRecognizedText] = useState<string>("");
+  const [regionTopics, setRegionTopics] = useState<
+    { text: string; weight: number; category?: string }[] | null
+  >(null);
+  const [regionTopicsLoading, setRegionTopicsLoading] = useState(false);
+  const [regionTopicsError, setRegionTopicsError] = useState<string | null>(null);
+
+  // 数据采集开关
+  const [isLoggingEnabled, setIsLoggingEnabled] = useState<boolean>(false);
+  const [lastVoiceAnnotation, setLastVoiceAnnotation] = useState<VoiceAnnotation | null>(null);
+
+  // 主页：OCR 选区处理
+  const runRegionOCR = async () => {
+    // 对当前可视容器整体做 OCR（不依赖蓝色选区）
+    const container = document.querySelector('.video-container') as HTMLElement | null;
+    if (!container) return;
+    const region = {
+      left: 0,
+      top: 0,
+      width: container.clientWidth,
+      height: container.clientHeight,
+    };
+    const isIPad = /iPad|iPhone|iPod/.test(navigator.userAgent) || ((/Macintosh/.test(navigator.userAgent)) && (navigator.maxTouchPoints > 1));
+    const scale = isIPad ? 1.5 : 2;
+    const crop = captureWYSIWYGRegionHiRes(region, scale) || captureWYSIWYGRegion(region);
+    if (!crop) return;
+    try {
+      setRegionCapturedImage(crop.toDataURL("image/png"));
+    } catch {}
+    setRegionTopics(null);
+    setRegionTopicsError(null);
+
+    const words = await recognizeWordsFromCanvas(crop, "eng");
+    setOcrWordsInRegion(words);
+    setOcrRegion(region);
+    setOcrScale(scale);
+    const fullText = words.map((w) => w.text).join(" ").trim();
+    try {
+      setRegionRecognizedText(fullText);
+    } catch {}
+
+    // 将整页 OCR 文本写入 sessionLogger，并调用 LLM 提取 topics
+    if (!fullText) {
+      setRegionTopics([]);
+      sessionLogger.setPageOcr({ pageText: "", pageTopics: [] });
+      return;
+    }
+
+    try {
+      setRegionTopicsLoading(true);
+      const res = await fetch("/api/topics", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: fullText, maxTopics: 30 }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        console.error("[Region OCR] /api/topics error:", res.status, errText);
+        setRegionTopicsError(`Topics API error: ${res.status}`);
+        setRegionTopics([]);
+        sessionLogger.setPageOcr({ pageText: fullText, pageTopics: [] });
+        return;
+      }
+
+      const data = await res.json();
+      const list = Array.isArray(data?.topics) ? data.topics : [];
+      setRegionTopics(list);
+      sessionLogger.setPageOcr({ pageText: fullText, pageTopics: list });
+      console.log("[Region OCR] topics for recommendation:", list);
+    } catch (e) {
+      console.error("[Region OCR] failed to call /api/topics:", e);
+      setRegionTopicsError("Failed to generate topics");
+      setRegionTopics([]);
+      sessionLogger.setPageOcr({ pageText: fullText, pageTopics: [] });
+    } finally {
+      setRegionTopicsLoading(false);
+    }
+  };
+
+  const clearRegionOCR = () => {
+    setOcrWordsInRegion(null);
+    setOcrRegion(null);
+    setRegionCapturedImage("");
+    setRegionRecognizedText("");
+    setRegionTopics(null);
+    setRegionTopicsError(null);
+  };
+
+  // 绘制 OCR 叠加词框到 ocrOverlayCanvas
+  useEffect(() => {
+    const c = ocrOverlayCanvasRef.current;
+    const container = document.querySelector(".video-container") as HTMLElement | null;
+    if (!c || !container) return;
+    const dpr = window.devicePixelRatio || 1;
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    if (c.width !== cw * dpr) c.width = cw * dpr;
+    if (c.height !== ch * dpr) c.height = ch * dpr;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+
+    if (!ocrWordsInRegion || !ocrRegion) return;
+
+    const scaleBack = (val: number) => val / (dpr * (ocrScale || 1));
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "rgba(0,0,0,0.9)";
+    ctx.fillStyle = "rgba(255,255,0,0.18)";
+    for (const w of ocrWordsInRegion) {
+      const x = ocrRegion.left + scaleBack(w.bbox.x);
+      const y = ocrRegion.top + scaleBack(w.bbox.y);
+      const W = scaleBack(w.bbox.w);
+      const H = scaleBack(w.bbox.h);
+      ctx.fillRect(x, y, W, H);
+      ctx.strokeRect(x, y, W, H);
+    }
+  }, [ocrWordsInRegion, ocrRegion, ocrScale, videoScale, videoTranslate]);
 
   // 手指检测相关状态
   const [handResults, setHandResults] = useState<any>(null); // MediaPipe 检测结果
@@ -48,17 +198,135 @@ export default function Home() {
   const [handDetectionMode, setHandDetectionMode] = useState<'pencil' | 'finger'>('pencil'); // 输入模式
   const [handsInstance, setHandsInstance] = useState<any>(null); // MediaPipe Hands 实例
   
+  // 用户兴趣度检测相关状态
+  const [isInterestDetectionEnabled, setIsInterestDetectionEnabled] = useState<boolean>(false); // 是否启用兴趣度检测
+  const [movementTrail, setMovementTrail] = useState<Array<{x: number, y: number, timestamp: number, speed: number}>>([]); // 移动轨迹
+
+  // 同步 warpCompensation 到 ref，供 MediaPipe 回调和 Three 投影使用
+  useEffect(() => {
+    warpCompensationRef.current = warpCompensation;
+  }, [warpCompensation]);
+  const [interestHeatmap, setInterestHeatmap] = useState<Map<string, number>>(new Map()); // 兴趣热点图
+  const [currentInterestScore, setCurrentInterestScore] = useState<number>(0); // 当前兴趣度分数
+  const [detectedKeywords, setDetectedKeywords] = useState<string[]>([]); // 检测到的关键词
+  const [interestAnalysis, setInterestAnalysis] = useState<{
+    totalInterestScore: number;
+    averageSpeed: number;
+    focusAreas: Array<{x: number, y: number, radius: number, score: number}>;
+    topKeywords: Array<{keyword: string, score: number}>;
+  } | null>(null); // 兴趣分析结果
+
+  // 调试用：当前指尖最近的 OCR 词
+  const [debugNearestWord, setDebugNearestWord] = useState<NearestWordInfo | null>(null);
+  
+  // 指读数据采样（约 10Hz）：记录指尖位置 + 最近 OCR 词框
+  useEffect(() => {
+    if (!isLoggingEnabled) return;
+
+    const intervalMs = 100; // 10Hz
+    let timer: number | undefined;
+
+    const tick = () => {
+      const pointer = fingerTipPosition;
+      if (
+        pointer &&
+        ocrWordsInRegion &&
+        ocrWordsInRegion.length > 0 &&
+        ocrRegion &&
+        ocrScale
+      ) {
+        const t0 = (typeof performance !== "undefined" && performance.now)
+          ? performance.now()
+          : Date.now();
+
+        const nearest = getNearestOcrWord(
+          ocrWordsInRegion,
+          ocrRegion,
+          ocrScale,
+          pointer,
+          { maxDistancePx: Infinity }
+        );
+
+        const t1 = (typeof performance !== "undefined" && performance.now)
+          ? performance.now()
+          : Date.now();
+        const dt = t1 - t0;
+        // 在 Next 开发模式下，这个 log 会同时出现在浏览器控制台和 dev server 终端里
+        if (dt > 0.1) {
+          console.log(
+            "[NearestWord][perf] cost:",
+            dt.toFixed(3),
+            "ms",
+            "| words:",
+            ocrWordsInRegion.length
+          );
+        }
+        setDebugInfo(
+   
+        dt.toFixed(3)
+        );
+
+        // 更新日志采样
+        const sample: PointerSampleInput = {
+          timestamp: Date.now(),
+          x: pointer.x,
+          y: pointer.y,
+          inputMode: handDetectionMode,
+          nearestWord: nearest,
+          pressure: currentPressure,
+          level,
+          interestScore: currentInterestScore,
+          speed: undefined,
+        };
+        sessionLogger.addPointerSample(sample);
+
+        // 更新调试用最近词
+        setDebugNearestWord(nearest);
+      } else {
+        setDebugNearestWord({ text: "-1", bbox: { x: 0, y: 0, w: 0, h: 0 }, distance: Infinity });
+        setDebugInfo(
+          "pointer: " + (pointer ? "true" : "false") +
+        "ocrWordsInRegion: " + (ocrWordsInRegion ? "true" : "false") +
+        "ocrWordsInRegion.length: " + (ocrWordsInRegion?.length > 0 ? "true" : "false") +
+        "ocrRegion: " + (ocrRegion ? "true" : "false") +
+        "ocrScale: " + (ocrScale ? "true" : "false")
+        );
+      }
+
+      timer = window.setTimeout(tick, intervalMs);
+    };
+
+    timer = window.setTimeout(tick, intervalMs);
+    return () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [
+    isLoggingEnabled,
+    fingerTipPosition,
+    ocrWordsInRegion,
+    ocrRegion,
+    ocrScale,
+    handDetectionMode,
+    currentPressure,
+    level,
+    currentInterestScore,
+  ]);
+  
   // 长按检测相关状态（只保留UI需要的字段）
   const [longPressState, setLongPressState] = useState<{
     isActive: boolean;
     currentDuration: number;
     currentLevel: Level;
     shouldTriggerOnMove: Level | false; // 标记应该触发的级别，false表示不触发
+    startPosition: {x: number, y: number} | null;
   }>({
     isActive: false,
     currentDuration: 0,
     currentLevel: 'light',
-    shouldTriggerOnMove: false
+    shouldTriggerOnMove: false,
+    startPosition: null
   });
   
   // 手指检测配置参数
@@ -76,6 +344,205 @@ export default function Home() {
     hardThreshold: 5500,   // hard级别阈值（毫秒）
     autoTriggerDelay: 1800  // 自动触发延迟（毫秒）
   };
+
+  // 手指模式：长按自动调用 LLM 的开关
+  const [isFingerLongPressLLMEnabled, setIsFingerLongPressLLMEnabled] = useState<boolean>(true);
+
+  // 训练 topic 选择（用于 toast 展示）
+  const [lastSelectedTopic, setLastSelectedTopic] = useState<string | null>(null);
+
+  // 兴趣度检测配置参数
+  const interestDetectionConfig = {
+    trailMaxLength: 1000, // 轨迹最大长度
+    speedThreshold: {
+      slow: 0.5,    // 慢速阈值（像素/毫秒）
+      fast: 3.0     // 快速阈值（像素/毫秒）
+    },
+    stayTimeThreshold: 500, // 停留时间阈值（毫秒）
+    heatmapGridSize: 20,    // 热点图网格大小（像素）
+    interestDecayRate: 0.95, // 兴趣度衰减率
+    minInterestScore: 0.1   // 最小兴趣度分数
+  };
+
+  // 兴趣度检测核心算法函数
+  const calculateSpeed = (point1: {x: number, y: number, timestamp: number}, point2: {x: number, y: number, timestamp: number}): number => {
+    const distance = Math.hypot(point2.x - point1.x, point2.y - point1.y);
+    const timeDiff = point2.timestamp - point1.timestamp;
+    return timeDiff > 0 ? distance / timeDiff : 0;
+  };
+
+  const updateMovementTrail = (x: number, y: number) => {
+    const timestamp = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const newPoint = { x, y, timestamp, speed: 0 };
+    
+    setMovementTrail(prevTrail => {
+      let updatedTrail = [...prevTrail];
+      
+      // 计算速度
+      if (updatedTrail.length > 0) {
+        const lastPoint = updatedTrail[updatedTrail.length - 1];
+        newPoint.speed = calculateSpeed(lastPoint, newPoint);
+      }
+      
+      updatedTrail.push(newPoint);
+      
+      // 限制轨迹长度
+      if (updatedTrail.length > interestDetectionConfig.trailMaxLength) {
+        updatedTrail = updatedTrail.slice(-interestDetectionConfig.trailMaxLength);
+      }
+      
+      return updatedTrail;
+    });
+  };
+
+  // rAF 采样：启用兴趣检测且存在指尖坐标时，以 ~60fps 更新轨迹
+  useEffect(() => {
+    if (!isInterestDetectionEnabled) return;
+    let rafId: number | null = null;
+    const tick = () => {
+      if (fingerTipPosition) {
+        updateMovementTrail(fingerTipPosition.x, fingerTipPosition.y);
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, [isInterestDetectionEnabled, fingerTipPosition?.x, fingerTipPosition?.y]);
+
+  const calculateInterestScore = (trail: Array<{x: number, y: number, timestamp: number, speed: number}>): number => {
+    if (trail.length < 2) return 0;
+    
+    let totalScore = 0;
+    let slowMovementCount = 0;
+    let stayTimeCount = 0;
+    
+    // 分析最近10个点的行为模式
+    const recentPoints = trail.slice(-10);
+    
+    for (let i = 1; i < recentPoints.length; i++) {
+      const point = recentPoints[i];
+      const prevPoint = recentPoints[i - 1];
+      
+      // 速度分析
+      if (point.speed < interestDetectionConfig.speedThreshold.slow) {
+        slowMovementCount++;
+      }
+      
+      // 停留时间分析
+      const timeDiff = point.timestamp - prevPoint.timestamp;
+      if (timeDiff > interestDetectionConfig.stayTimeThreshold) {
+        stayTimeCount++;
+      }
+    }
+    
+    // 计算兴趣度分数
+    const speedScore = slowMovementCount / recentPoints.length; // 0-1
+    const stayScore = stayTimeCount / recentPoints.length; // 0-1
+    const densityScore = Math.min(trail.length / 50, 1); // 轨迹密度分数
+    
+    totalScore = (speedScore * 0.4 + stayScore * 0.4 + densityScore * 0.2) * 100;
+    
+    return Math.min(totalScore, 100);
+  };
+
+  const updateInterestHeatmap = (x: number, y: number, score: number) => {
+    const gridSize = interestDetectionConfig.heatmapGridSize;
+    const gridX = Math.floor(x / gridSize);
+    const gridY = Math.floor(y / gridSize);
+    const gridKey = `${gridX},${gridY}`;
+    
+    setInterestHeatmap(prevHeatmap => {
+      const newHeatmap = new Map(prevHeatmap);
+      const currentScore = newHeatmap.get(gridKey) || 0;
+      const newScore = Math.min(currentScore + score, 100);
+      
+      if (newScore > interestDetectionConfig.minInterestScore) {
+        newHeatmap.set(gridKey, newScore);
+      } else {
+        newHeatmap.delete(gridKey);
+      }
+      
+      return newHeatmap;
+    });
+  };
+
+  const extractKeywordsFromArea = async (x: number, y: number, radius: number = 50): Promise<string[]> => {
+    try {
+      // 结合OCR结果提取关键词
+      if (answer && answer.length > 0) {
+        // 简单的关键词提取逻辑
+        const words = answer.split(/[\s\n,，。！？；：]/).filter(word => 
+          word.length > 1 && 
+          !['的', '了', '在', '是', '有', '和', '与', '或', '但', '而', '这', '那', '个', '一', '二', '三', '四', '五'].includes(word)
+        );
+        
+        // 返回前5个最长的词作为关键词
+        return words
+          .sort((a, b) => b.length - a.length)
+          .slice(0, 5)
+          .map(word => word.trim());
+      }
+      
+      // 如果没有OCR结果，返回模拟关键词
+      const keywords = ['技术', '创新', '人工智能', '用户体验', '设计', '算法', '数据', '分析', '系统', '应用'];
+      return keywords.slice(0, Math.floor(Math.random() * 3) + 1);
+    } catch (error) {
+      console.error('关键词提取失败:', error);
+      return [];
+    }
+  };
+
+  const analyzeInterestPatterns = async () => {
+    if (movementTrail.length < 5) return;
+    
+    const totalScore = calculateInterestScore(movementTrail);
+    const averageSpeed = movementTrail.reduce((sum, point) => sum + point.speed, 0) / movementTrail.length;
+    
+    // 识别焦点区域
+    const focusAreas: Array<{x: number, y: number, radius: number, score: number}> = [];
+    const heatmapEntries = Array.from(interestHeatmap.entries());
+    
+    for (const [key, score] of heatmapEntries) {
+      if (score > 20) { // 只显示高分区域
+        const [gridX, gridY] = key.split(',').map(Number);
+        const x = gridX * interestDetectionConfig.heatmapGridSize;
+        const y = gridY * interestDetectionConfig.heatmapGridSize;
+        focusAreas.push({ x, y, radius: 30, score });
+      }
+    }
+    
+    // 提取关键词
+    const keywords = await extractKeywordsFromArea(0, 0, 100);
+    const topKeywords = keywords.map(keyword => ({
+      keyword,
+      score: Math.random() * 50 + 20 // 模拟分数
+    }));
+    
+    setInterestAnalysis({
+      totalInterestScore: totalScore,
+      averageSpeed,
+      focusAreas,
+      topKeywords
+    });
+  };
+
+  // 稳定的实时速度（最近8点的总位移/总时间，px/s）
+  const stableRealtimeSpeedPxPerSec = useMemo(() => {
+    const n = movementTrail.length;
+    if (n < 3) return 0;
+    const windowSize = Math.min(8, n - 1);
+    const startIdx = n - 1 - windowSize;
+    const segment = movementTrail.slice(startIdx);
+    let totalDist = 0;
+    for (let i = 1; i < segment.length; i++) {
+      totalDist += Math.hypot(segment[i].x - segment[i-1].x, segment[i].y - segment[i-1].y);
+    }
+    const totalTime = segment[segment.length - 1].timestamp - segment[0].timestamp;
+    if (totalTime <= 0) return 0;
+    return (totalDist / totalTime) * 1000; // px/s
+  }, [movementTrail]);
 
   // 检测设备信息
   useEffect(() => {
@@ -180,6 +647,11 @@ export default function Home() {
             }
             
             setVideoReady(true);
+            
+            // 延迟初始化Three.js渲染器，确保视频已开始播放
+            setTimeout(() => {
+              initThreeRenderer();
+            }, 300);
           } catch (e) {
             console.error("play() failed", e);
           }
@@ -189,6 +661,342 @@ export default function Home() {
       }
     })();
   }, []);
+  
+  // 初始化Three.js渲染器（用于实时显示3D效果）
+  const initThreeRenderer = () => {
+    const video = videoRef.current;
+    const canvas = threeCanvasRef.current;
+    
+    if (!video || !canvas || video.videoWidth === 0) {
+      console.warn('[Three.js Init] 视频未准备好，延迟初始化');
+      setTimeout(initThreeRenderer, 500);
+      return;
+    }
+    
+    console.log('[Three.js Init] 开始初始化Three.js实时渲染器');
+    
+    const containerWidth = 1000;
+    const containerHeight = 1000;
+    
+    // 创建渲染器
+    const renderer = new THREE.WebGLRenderer({ 
+      canvas,
+      antialias: true,
+      alpha: false
+    });
+    // 处理高DPR设备，保证渲染内容与CSS像素对齐
+    renderer.setPixelRatio(Math.max(1, window.devicePixelRatio || 1));
+    renderer.setSize(containerWidth, containerHeight, false);
+    renderer.setClearColor(0x000000, 1);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    threeRendererRef.current = renderer;
+    
+    // 创建场景
+    const scene = new THREE.Scene();
+    threeSceneRef.current = scene;
+    
+    // 创建相机（Perspective，匹配CSS perspective(800px)）
+    const fov = 2 * Math.atan(containerHeight / (2 * 800)) * 180 / Math.PI; // 根据perspective(800px)推导FOV
+    const aspect = containerWidth / containerHeight;
+    const near = 0.1;
+    const far = 5000;
+    const camera = new THREE.PerspectiveCamera(fov, aspect, near, far);
+    camera.position.set(0, 0, 800); // 相机Z=perspective距离
+    camera.lookAt(0, 0, 0);
+    threeCameraRef.current = camera;
+    
+    // 创建视频纹理
+    const videoTexture = new THREE.VideoTexture(video);
+    videoTexture.minFilter = THREE.LinearFilter;
+    videoTexture.magFilter = THREE.LinearFilter;
+    videoTexture.format = THREE.RGBAFormat;
+    videoTexture.colorSpace = THREE.SRGBColorSpace;
+    threeTextureRef.current = videoTexture;
+    
+    // 计算视频平面尺寸
+    const videoAspect = video.videoWidth / video.videoHeight;
+    const containerAspect = containerWidth / containerHeight;
+    
+    let planeWidth, planeHeight;
+    if (videoAspect > containerAspect) {
+      planeWidth = containerWidth;
+      planeHeight = containerWidth / videoAspect;
+    } else {
+      planeHeight = containerHeight;
+      planeWidth = containerHeight * videoAspect;
+    }
+    
+    // 创建平面（放入pivot使其围绕顶部旋转）
+    const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
+    // 自定义着色器材质：在rotateX之后对Y做非线性补偿，减轻行距压缩
+    const uniforms = {
+      u_map: { value: videoTexture as THREE.Texture },
+      u_comp: { value: warpCompensation }, // 0~0.5 建议
+    };
+    shaderUniformsRef.current = uniforms as any;
+    const material = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: `
+        varying vec2 v_uv;
+        void main() {
+          v_uv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        precision mediump float;
+        uniform sampler2D u_map;
+        uniform float u_comp; // 0关闭，越大补偿越强
+        varying vec2 v_uv;
+        void main() {
+          // y越靠近下方，压缩越明显；做反向拉伸补偿：scaleY = 1.0 / mix(1.0, 1.0 + u_comp, v_uv.y)
+          float scale = 1.0 / mix(1.0, 1.0 + u_comp, 1.0-v_uv.y);
+          float cy = 0.5;
+          float y = (v_uv.y - cy) * scale + cy; // 围绕中心做非线性拉伸
+          vec2 uv2 = vec2(v_uv.x, clamp(y, 0.0, 1.0));
+          gl_FragColor = texture2D(u_map, uv2);
+        }
+      `,
+      transparent: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.set(0, -planeHeight / 2, 0); // 将平面下移半个高度，使pivot在顶部
+    threeMeshRef.current = mesh;
+    mesh.scale.x *= -1; // 水平镜像
+    const pivot = new THREE.Object3D();
+    pivot.position.set(0, planeHeight / 2, 0); // 顶部作为轴心
+    pivot.add(mesh);
+    scene.add(pivot);
+    threePivotRef.current = pivot;
+    threePivotBaseYRef.current = pivot.position.y;
+    // 应用初始变换（避免需要用户交互才更新）
+    try {
+      // 平移
+      pivot.position.x = videoTranslate.x;
+      pivot.position.y = threePivotBaseYRef.current - videoTranslate.y;
+      // 缩放（保持水平镜像）
+      mesh.scale.set(videoScale, videoScale, 1);
+      mesh.scale.x *= -1;
+      // 透视旋转
+      const rotationAngle = -(perspectiveStrength / 100) * (Math.PI / 6);
+      pivot.rotation.x = rotationAngle;
+      // 相机位置（匹配 CSS perspective(800px)）
+      camera.position.set(0, 0, 800);
+      camera.lookAt(0, 0, 0);
+      // 补偿强度
+      if (shaderUniformsRef.current) {
+        shaderUniformsRef.current.u_comp.value = warpCompensation;
+      }
+    } catch {}
+    
+    console.log('[Three.js Init] Three.js渲染器初始化完成，平面尺寸:', planeWidth, 'x', planeHeight);
+    
+    // 开始动画循环
+    startThreeAnimation();
+  };
+  
+  // Three.js动画循环
+  const startThreeAnimation = () => {
+    const animate = () => {
+      animationFrameRef.current = requestAnimationFrame(animate);
+      
+      const renderer = threeRendererRef.current;
+      const scene = threeSceneRef.current;
+      const camera = threeCameraRef.current;
+      const texture = threeTextureRef.current;
+      const mesh = threeMeshRef.current;
+      
+      if (!renderer || !scene || !camera || !mesh) return;
+      
+      // 更新视频纹理
+      if (texture) {
+        texture.needsUpdate = true;
+      }
+      
+      renderer.render(scene, camera);
+    };
+    animate();
+  };
+
+  // ===== Warp 补偿：严格按 shader 公式重建，并在「以顶部为 0」的坐标系里求反函数 =====
+  // shader 里的代码（注意 v_uv.y 的坐标系是以底部为 0，顶部为 1）：
+  //   float scale = 1.0 / mix(1.0, 1.0 + u_comp, 1.0 - v_uv.y);
+  //   float cy = 0.5;
+  //   float y  = (v_uv.y - cy) * scale + cy;
+  //   vec2 uv2 = vec2(v_uv.x, clamp(y, 0.0, 1.0));
+  //
+  // MediaPipe 的 v 是「顶部为 0，底部为 1」的坐标，所以这里先把它转换到同一个 top-based 坐标系下推导：
+  //
+  //   设 y_t = 1.0 - v_uv.y  （top-based：0=top,1=bottom）
+  //       y2_t = 1.0 - uv2_y
+  //
+  // 可以推导出 top-based 坐标下的前向 warp：
+  //   y2_t = 0.5 - (0.5 - y_t) / (1.0 + c * y_t)    （c = u_comp）
+  //
+  // 这里我们实现：
+  //   1) applyWarpTop(y_t, c)   : y_t -> y2_t   （严格等价于 shader 的 warp）
+  //   2) invertVerticalWarp(v, c): 已知「原始视频坐标」v（= y2_t，0=top,1=bottom），
+  //                                通过数值二分求出对应的几何参数 y_t，
+  //                                再用它作为平面的 v 参与 3D 透视投影。
+  const applyWarpTop = (vTop: number, comp: number): number => {
+    if (comp <= 0) return vTop;
+    const denom = 1 + comp * vTop;
+    if (denom <= 1e-6) return Math.min(1, Math.max(0, vTop));
+    const y2 = 0.5 - (0.5 - vTop) / denom;
+    return Math.min(1, Math.max(0, y2));
+  };
+
+  const invertVerticalWarp = (vSample: number, comp: number): number => {
+    if (comp <= 0) return vSample;
+    // 简单的单调二分：在 [0,1] 上寻找 applyWarpTop(v, comp) ≈ vSample
+    let low = 0;
+    let high = 1;
+    let mid = vSample;
+    for (let i = 0; i < 24; i++) {
+      mid = (low + high) / 2;
+      const y2 = applyWarpTop(mid, comp);
+      if (y2 > vSample) {
+        high = mid;
+      } else {
+        low = mid;
+      }
+    }
+    const vPlane = (low + high) / 2;
+    return Math.min(1, Math.max(0, vPlane));
+  };
+
+  // 将 MediaPipe 归一化视频坐标 (u,v in [0,1]) 映射到叠加层屏幕坐标
+  const projectVideoUVToOverlay = (u: number, v: number): {x: number; y: number} | null => {
+    const renderer = threeRendererRef.current;
+    const camera = threeCameraRef.current;
+    const mesh = threeMeshRef.current;
+    if (!renderer || !camera || !mesh) return null;
+
+    // 每次调用时取 ref 里的最新补偿值，避免 MediaPipe 回调持有旧的闭包值
+    const comp = warpCompensationRef.current;
+
+    // 注意：MediaPipe 给的是“原始视频坐标”（对应 shader 里的 uv2.y），
+    // 但 three.js 平面几何用的是 v_uv.y 作为参数坐标。
+    // 我们要找到这样的 v_uv.y，使得 warp(v_uv.y) ≈ v（也就是这行像素最终出现在平面上的高度），
+    // 所以这里使用反函数把 v 映射回几何参数坐标。
+    const vPlane = invertVerticalWarp(v, comp);
+
+    // 取平面尺寸
+    const geom = mesh.geometry as THREE.PlaneGeometry;
+    const planeWidth = geom.parameters.width as number;
+    const planeHeight = geom.parameters.height as number;
+    // 视频UV → mesh局部坐标（mesh 局部原点在视频中心，+X右，+Y上）
+    const localX = (u - 0.5) * planeWidth;
+    // const localY = (0.5 - v) * planeHeight; // v向下 → Three 向上（旧版本）
+    const localY = (0.5 - vPlane) * planeHeight; // v向下 → Three 向上（用反warp后的 vPlane）
+    const local = new THREE.Vector3(localX, localY, 0);
+    // 转世界坐标
+    const world = local.clone().applyMatrix4(mesh.matrixWorld);
+    // 投影到NDC
+    const ndc = world.clone().project(camera);
+    // NDC → 屏幕像素（使用渲染canvas的CSS大小）
+    const cssW = renderer.domElement.clientWidth || 500;
+    const cssH = renderer.domElement.clientHeight || 500;
+    const x = (ndc.x * 0.5 + 0.5) * cssW;
+    const y = (-ndc.y * 0.5 + 0.5) * cssH;
+    return { x, y };
+  };
+
+  // 工具：从Three渲染canvas按选择区域进行WYSIWYG裁剪（考虑DPR）
+  const captureWYSIWYGRegion = (region: {left: number; top: number; width: number; height: number}) => {
+    const renderer = threeRendererRef.current;
+    const scene = threeSceneRef.current;
+    const camera = threeCameraRef.current;
+    if (!renderer || !scene || !camera) return null;
+    // 强制渲染一帧以确保内容最新
+    renderer.render(scene, camera);
+    const source = renderer.domElement;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const sx = Math.floor(region.left * dpr);
+    const sy = Math.floor(region.top * dpr);
+    const sw = Math.floor(region.width * dpr);
+    const sh = Math.floor(region.height * dpr);
+    if (sw <= 0 || sh <= 0) return null;
+    const out = document.createElement('canvas');
+    out.width = sw; out.height = sh;
+    const ctx = out.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+    return out;
+  };
+
+  // 高分辨率WYSIWYG裁剪：使用离屏renderer按scale渲染后再裁剪
+  const captureWYSIWYGRegionHiRes = (region: {left: number; top: number; width: number; height: number}, scale: number = 2) => {
+    const baseRenderer = threeRendererRef.current;
+    const scene = threeSceneRef.current;
+    const camera = threeCameraRef.current;
+    if (!baseRenderer || !scene || !camera) return null;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const cssW = baseRenderer.domElement.clientWidth || 500;
+    const cssH = baseRenderer.domElement.clientHeight || 500;
+    // 复用离屏renderer
+    let off = offscreenRendererRef.current;
+    if (!off) {
+      off = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
+      off.outputColorSpace = THREE.SRGBColorSpace;
+      offscreenRendererRef.current = off;
+    }
+    off.setPixelRatio(dpr);
+    off.setSize(cssW * scale, cssH * scale, false);
+    off.render(scene, camera);
+    const src = off.domElement;
+    const sx = Math.floor(region.left * dpr * scale);
+    const sy = Math.floor(region.top * dpr * scale);
+    const sw = Math.floor(region.width * dpr * scale);
+    const sh = Math.floor(region.height * dpr * scale);
+    if (sw <= 0 || sh <= 0) { return null; }
+    // 复用裁剪canvas
+    let out = captureCanvasRef.current;
+    if (!out) {
+      out = document.createElement('canvas');
+      captureCanvasRef.current = out;
+    }
+    out.width = sw; out.height = sh;
+    const ctx = out.getContext('2d');
+    if (!ctx) { return null; }
+    ctx.drawImage(src, sx, sy, sw, sh, 0, 0, sw, sh);
+    return out;
+  };
+  
+  // 监听变换参数变化，实时更新Three.js场景（使用pivot模拟CSS transform-origin: top）
+  useEffect(() => {
+    const mesh = threeMeshRef.current;
+    const pivot = threePivotRef.current;
+    const camera = threeCameraRef.current;
+    
+    if (!mesh || !pivot || !camera) return;
+    
+    // 顺序匹配CSS: transform-origin: top → translate → scale/flip → rotateX
+    // 1) 平移（以pivot为参考系，保持顶部轴心基准）
+    pivot.position.x = videoTranslate.x;
+    pivot.position.y = threePivotBaseYRef.current - videoTranslate.y;
+    // 在更新变换的 effect 里（与 pivot.position.y 同处）
+
+
+    
+    // 2) 缩放
+    mesh.scale.set(videoScale, videoScale, 1);
+    mesh.scale.x *= -1; // 水平镜像
+    
+    // 3) 透视旋转：绕X轴负角度（下边变大）
+    const rotationAngle = -(perspectiveStrength / 100) * (Math.PI / 6); // 0到-20度
+    pivot.rotation.x = rotationAngle;
+    
+    // 4) 相机匹配CSS perspective(800px)
+    camera.position.set(0, 0, 800);
+    camera.lookAt(0, 0, 0);
+    // 更新补偿强度
+    if (shaderUniformsRef.current) {
+      shaderUniformsRef.current.u_comp.value = warpCompensation;
+    }
+    
+  }, [videoScale, videoTranslate, perspectiveStrength, warpCompensation]);
 
   // 2) initialize OCR
   useEffect(() => {
@@ -315,28 +1123,25 @@ export default function Home() {
                 videoOffsetY = 0;
               }
               
-              // 1. 基于实际视频显示区域的坐标转换（镜像修正）
-              let x = (1 - fingerTip.x) * videoDisplayWidth + videoOffsetX;
-              let y = fingerTip.y * videoDisplayHeight + videoOffsetY;
-              
-              // 2. 考虑视频变换（缩放和平移）
-              // 变换是相对于容器中心的
-              const centerX = containerRect.width / 2;
-              const centerY = containerRect.height / 2;
-              
-              // 将坐标转换为相对于中心的坐标
-              let relativeX = x - centerX;
-              let relativeY = y - centerY;
-              
-              // 应用视频的变换（缩放和平移）
-              relativeX = relativeX * videoScale + videoTranslate.x;
-              relativeY = relativeY * videoScale + videoTranslate.y;
-              
-              // 转换回绝对坐标
-              x = relativeX + centerX;
-              y = relativeY + centerY;
-              
+              // 使用Three.js投影，获得在overlay上的像素坐标
+              const projected = projectVideoUVToOverlay(fingerTip.x, fingerTip.y);
+              if (!projected) return;
+              const { x, y } = projected;
               setFingerTipPosition({ x, y });
+              
+              // 兴趣度检测：更新移动轨迹
+              if (isInterestDetectionEnabled) {
+                updateMovementTrail(x, y);
+                
+                // 计算当前兴趣度分数
+                const currentScore = calculateInterestScore(movementTrail);
+                setCurrentInterestScore(currentScore);
+                
+                // 更新兴趣热点图
+                if (currentScore > 10) {
+                  updateInterestHeatmap(x, y, currentScore);
+                }
+              }
               
               // 长按检测逻辑（使用ref减少setState）
               const currentTime = Date.now();
@@ -380,7 +1185,8 @@ export default function Home() {
                       isActive,
                       currentDuration: duration,
                       currentLevel,
-                      shouldTriggerOnMove: false
+                      shouldTriggerOnMove: false,
+                      startPosition: newPosition
                     }));
                   }
                 } else {
@@ -403,7 +1209,8 @@ export default function Home() {
                     isActive: false,
                     currentDuration: 0,
                     currentLevel: 'light',
-                    shouldTriggerOnMove: triggerLevel
+                    shouldTriggerOnMove: triggerLevel,
+                    startPosition: null
                   });
                 }
               } else {
@@ -420,18 +1227,19 @@ export default function Home() {
                   isActive: false,
                   currentDuration: 0,
                   currentLevel: 'light',
-                  shouldTriggerOnMove: false
+                  shouldTriggerOnMove: false,
+                  startPosition: null
                 });
               }
               
-              console.log('[HandDetection] 检测到指尖位置 (含宽高比修正):', { 
-                原始MediaPipe: { x: fingerTip.x.toFixed(3), y: fingerTip.y.toFixed(3) },
-                视频尺寸: { w: video.videoWidth, h: video.videoHeight, aspect: videoAspect.toFixed(2) },
-                容器尺寸: { w: containerRect.width, h: containerRect.height, aspect: containerAspect.toFixed(2) },
-                实际显示区域: { w: videoDisplayWidth.toFixed(1), h: videoDisplayHeight.toFixed(1), offsetX: videoOffsetX.toFixed(1), offsetY: videoOffsetY.toFixed(1) },
-                最终坐标: { x: x.toFixed(1), y: y.toFixed(1) },
-                当前变换: { scale: videoScale.toFixed(2), translateX: videoTranslate.x.toFixed(1), translateY: videoTranslate.y.toFixed(1) }
-              });
+              // console.log('[HandDetection] 检测到指尖位置 (含宽高比修正):', { 
+              //   原始MediaPipe: { x: fingerTip.x.toFixed(3), y: fingerTip.y.toFixed(3) },
+              //   视频尺寸: { w: video.videoWidth, h: video.videoHeight, aspect: videoAspect.toFixed(2) },
+              //   容器尺寸: { w: containerRect.width, h: containerRect.height, aspect: containerAspect.toFixed(2) },
+              //   实际显示区域: { w: videoDisplayWidth.toFixed(1), h: videoDisplayHeight.toFixed(1), offsetX: videoOffsetX.toFixed(1), offsetY: videoOffsetY.toFixed(1) },
+              //   最终坐标: { x: x.toFixed(1), y: y.toFixed(1) },
+              //   当前变换: { scale: videoScale.toFixed(2), translateX: videoTranslate.x.toFixed(1), translateY: videoTranslate.y.toFixed(1) }
+              // });
             }
           } else {
             setFingerTipPosition(null);
@@ -455,7 +1263,8 @@ export default function Home() {
               isActive: false,
               currentDuration: 0,
               currentLevel: 'light',
-              shouldTriggerOnMove: triggerLevel
+              shouldTriggerOnMove: triggerLevel,
+              startPosition: null
             });
           }
         });
@@ -494,7 +1303,7 @@ export default function Home() {
         
       } catch (error) {
         console.error('[HandDetection] MediaPipe Hands 初始化失败:', error);
-        setDebugInfo(`手指检测初始化失败: ${error instanceof Error ? error.message : String(error)}`);
+        setDebugInfo(`hand detection initialization failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     };
     
@@ -529,6 +1338,8 @@ export default function Home() {
 
   // 长按自动触发OCR（仅在达到hard等级时）
   useEffect(() => {
+    if (!isFingerLongPressLLMEnabled) return;
+
     if (longPressState.isActive && 
         longPressState.currentLevel === 'hard' &&
         longPressState.currentDuration >= longPressConfig.hardThreshold && 
@@ -547,10 +1358,23 @@ export default function Home() {
       // 触发OCR
       onFingerSelection();
     }
-  }, [longPressState.isActive, longPressState.currentDuration, longPressState.currentLevel, fingerTipPosition, isProcessing]);
+  }, [isFingerLongPressLLMEnabled, longPressState.isActive, longPressState.currentDuration, longPressState.currentLevel, fingerTipPosition, isProcessing]);
+
+  // 定期分析兴趣模式
+  useEffect(() => {
+    if (!isInterestDetectionEnabled || movementTrail.length < 10) return;
+    
+    const analysisInterval = setInterval(() => {
+      analyzeInterestPatterns();
+    }, 2000); // 每2秒分析一次
+    
+    return () => clearInterval(analysisInterval);
+  }, [isInterestDetectionEnabled, movementTrail.length]);
 
   // 监听手指移开/消失触发
   useEffect(() => {
+    if (!isFingerLongPressLLMEnabled) return;
+
     if (longPressState.shouldTriggerOnMove !== false && !isProcessing) {
       console.log('[LongPress] 手指移开/消失触发OCR，使用级别:', longPressState.shouldTriggerOnMove);
       
@@ -567,7 +1391,7 @@ export default function Home() {
         shouldTriggerOnMove: false
       }));
     }
-  }, [longPressState.shouldTriggerOnMove, isProcessing]);
+  }, [isFingerLongPressLLMEnabled, longPressState.shouldTriggerOnMove, isProcessing]);
 
     // 3) Apple Pencil pressure three levels (with轻微防抖)
   useEffect(() => {
@@ -626,7 +1450,7 @@ export default function Home() {
         setLevel(maxLevelInSession);
         setCurrentMaxLevel("light"); // 重置显示状态
         console.log('[Pressure] 按压结束，使用最高level:', maxLevelInSession);
-        setDebugInfo(`按压完成 | 最终Level: ${maxLevelInSession}`);
+        setDebugInfo(`pressure end | final level: ${maxLevelInSession}`);
         
         // 注意：不在这里计算selectionBounds，移到onPointerUp中处理
       }
@@ -752,6 +1576,299 @@ export default function Home() {
     };
   };
 
+
+  // // Three.js渲染视频纹理截图函数（真正的3D变换，iPad兼容）
+  // const testWebGLScreenshot = async () => {
+  //   try {
+  //     console.log('[Three.js] 开始Three.js视频纹理截图...');
+      
+  //     const video = videoRef.current;
+  //     if (!video || video.readyState < 2) {
+  //       alert('❌ 视频未准备就绪，请等待视频加载完成');
+  //     return;
+  //   }
+    
+  //     console.log('[Three.js] 视频状态:', {
+  //       readyState: video.readyState,
+  //       videoWidth: video.videoWidth,
+  //       videoHeight: video.videoHeight,
+  //       currentTime: video.currentTime,
+  //       paused: video.paused
+  //     });
+      
+  //     // 检查视频是否有有效尺寸
+  //     if (video.videoWidth === 0 || video.videoHeight === 0) {
+  //       console.error('[Three.js] 视频尺寸无效:', video.videoWidth, 'x', video.videoHeight);
+  //       alert('❌ 视频尺寸无效，请确保视频已正确加载');
+  //     return;
+  //   }
+      
+  //     // 等待下一帧确保视频已渲染
+  //     await new Promise(resolve => {
+  //       if (video.paused) {
+  //         resolve(void 0);
+  //       } else {
+  //         // 等待视频播放事件
+  //         const waitForFrame = () => {
+  //           requestAnimationFrame(() => resolve(void 0));
+  //         };
+  //         if (video.readyState >= video.HAVE_CURRENT_DATA) {
+  //           waitForFrame();
+  //         } else {
+  //           video.addEventListener('canplay', waitForFrame, { once: true });
+  //         }
+  //       }
+  //     });
+      
+  //     console.log('[Three.js] 视频准备就绪，开始渲染');
+      
+  //     // 创建离屏渲染器
+  //     const containerWidth = 500;
+  //     const containerHeight = 500;
+  //     const renderWidth = containerWidth * 2; // 高分辨率
+  //     const renderHeight = containerHeight * 2;
+      
+  //     const renderer = new THREE.WebGLRenderer({ 
+  //       antialias: true, 
+  //       preserveDrawingBuffer: true,
+  //       alpha: false
+  //     });
+  //     renderer.setSize(renderWidth, renderHeight);
+  //     renderer.setClearColor(0x000000, 1); // 黑色背景
+      
+  //     // 设置色彩空间（重要！）
+  //     renderer.outputColorSpace = THREE.SRGBColorSpace;
+      
+  //     console.log('[Three.js] 渲染器创建成功，尺寸:', renderWidth, 'x', renderHeight);
+      
+  //     // 创建场景
+  //     const scene = new THREE.Scene();
+      
+  //     // 创建相机（Perspective，匹配CSS perspective(800px)）
+  //     const fov = 2 * Math.atan(containerHeight / (2 * 800)) * 180 / Math.PI; // FOV from perspective(800px)
+  //     const aspect = containerWidth / containerHeight;
+  //     const near = 0.1;
+  //     const far = 5000;
+  //     const camera = new THREE.PerspectiveCamera(fov, aspect, near, far);
+  //     camera.position.set(0, 0, 800);
+  //     camera.lookAt(0, 0, 0);
+      
+  //     console.log('[Three.js] 相机设置(Perspective):', { fov, aspect, near, far, position: camera.position });
+      
+  //     // 创建视频纹理
+  //     const videoTexture = new THREE.VideoTexture(video);
+  //     videoTexture.minFilter = THREE.LinearFilter;
+  //     videoTexture.magFilter = THREE.LinearFilter;
+  //     videoTexture.format = THREE.RGBAFormat;
+  //     videoTexture.colorSpace = THREE.SRGBColorSpace; // 设置正确的色彩空间
+  //     videoTexture.needsUpdate = true; // 强制更新纹理
+      
+  //     console.log('[Three.js] 视频纹理创建成功，属性:', {
+  //       image: videoTexture.image,
+  //       imageWidth: video.videoWidth,
+  //       imageHeight: video.videoHeight,
+  //       format: videoTexture.format,
+  //       colorSpace: videoTexture.colorSpace,
+  //       needsUpdate: videoTexture.needsUpdate
+  //     });
+      
+  //     // 先用canvas 2D测试视频是否有内容
+  //     const testCanvas = document.createElement('canvas');
+  //     testCanvas.width = 100;
+  //     testCanvas.height = 100;
+  //     const testCtx = testCanvas.getContext('2d');
+  //     if (testCtx) {
+  //       testCtx.drawImage(video, 0, 0, 100, 100);
+  //       const imageData = testCtx.getImageData(0, 0, 100, 100);
+  //       let hasContent = false;
+  //       for (let i = 0; i < imageData.data.length; i += 4) {
+  //         if (imageData.data[i] > 0 || imageData.data[i+1] > 0 || imageData.data[i+2] > 0) {
+  //           hasContent = true;
+  //           break;
+  //         }
+  //       }
+  //       console.log('[Three.js] 视频内容检测:', hasContent ? '有内容' : '全黑');
+  //       if (!hasContent) {
+  //         alert('⚠️ 视频内容为全黑，请检查摄像头');
+  //       }
+  //     }
+      
+  //     // 计算视频平面的尺寸（保持宽高比）
+  //     const videoAspect = video.videoWidth / video.videoHeight;
+  //     const containerAspect = containerWidth / containerHeight;
+      
+  //     let planeWidth, planeHeight;
+  //     if (videoAspect > containerAspect) {
+  //       planeWidth = containerWidth;
+  //       planeHeight = containerWidth / videoAspect;
+  //     } else {
+  //       planeHeight = containerHeight;
+  //       planeWidth = containerHeight * videoAspect;
+  //     }
+      
+  //     console.log('[Three.js] 平面尺寸:', { 
+  //       planeWidth, 
+  //       planeHeight,
+  //       videoAspect: videoAspect.toFixed(2),
+  //       containerAspect: containerAspect.toFixed(2)
+  //     });
+      
+  //     // 创建平面（使用pivot实现顶部为轴心）
+  //     const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
+  //     const material = new THREE.MeshBasicMaterial({ map: videoTexture, side: THREE.DoubleSide, transparent: false });
+  //     const mesh = new THREE.Mesh(geometry, material);
+  //     mesh.position.set(0, -planeHeight / 2, 0); // 把平面下移半个高度
+  //     const pivot = new THREE.Object3D();
+  //     pivot.position.set(0, planeHeight / 2, 0); // 顶部为旋转轴
+  //     pivot.add(mesh);
+  //     scene.add(pivot);
+      
+  //     console.log('[Three.js] 网格添加到场景');
+      
+  //     // 应用变换（与实时渲染完全一致）
+      
+  //     // 顺序匹配CSS: translate → scale → rotateX（以顶部为轴，保持pivot基准）
+  //     pivot.position.x = videoTranslate.x;
+  //     pivot.position.y = threePivotBaseYRef.current - videoTranslate.y;
+  //     mesh.scale.set(videoScale, videoScale, 1);
+  //     const rotationAngle = -(perspectiveStrength / 100) * (Math.PI / 9);
+  //     pivot.rotation.x = rotationAngle;
+      
+  //     console.log('[Three.js] 变换应用:', {
+  //       scale: { x: mesh.scale.x, y: mesh.scale.y },
+  //       position: { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
+  //       rotation: { x: mesh.rotation.x },
+  //       perspectiveStrength,
+  //       rotationAngle: rotationAngle * (180 / Math.PI) + '度',
+  //       cameraZ: camera.position.z
+  //     });
+      
+  //     // 如果有选择框，绘制到场景中
+  //     if (selectionBounds) {
+  //       // 创建选择框轮廓
+  //       const boxGeometry = new THREE.EdgesGeometry(
+  //         new THREE.PlaneGeometry(
+  //           selectionBounds.width,
+  //           selectionBounds.height
+  //         )
+  //       );
+  //       const boxMaterial = new THREE.LineBasicMaterial({ 
+  //         color: 0x00ff00, 
+  //         linewidth: 2 
+  //       });
+  //       const boxEdges = new THREE.LineSegments(boxGeometry, boxMaterial);
+        
+  //       // 计算选择框的世界坐标
+  //       const boxX = (selectionBounds.left + selectionBounds.width / 2) - containerWidth / 2;
+  //       const boxY = -(selectionBounds.top + selectionBounds.height / 2) + containerHeight / 2;
+        
+  //       boxEdges.position.set(boxX, boxY, 0.1); // 稍微前置避免z-fighting
+  //       scene.add(boxEdges);
+        
+  //       console.log('[Three.js] 添加选择框:', { boxX, boxY, ...selectionBounds });
+  //     }
+      
+  //     // 如果有长按进度环，绘制到场景中
+  //     if (longPressState.isActive && longPressState.startPosition) {
+  //       const { x, y } = longPressState.startPosition;
+  //       const progress = longPressState.currentDuration / longPressConfig.hardThreshold;
+        
+  //       // 创建进度环
+  //       const ringGeometry = new THREE.RingGeometry(18, 22, 32, 1, 0, Math.PI * 2 * progress);
+  //       const ringMaterial = new THREE.MeshBasicMaterial({ 
+  //         color: longPressState.currentLevel === 'hard' ? 0xff0000 :
+  //                longPressState.currentLevel === 'medium' ? 0xffa500 : 0x00ff00,
+  //         side: THREE.DoubleSide
+  //       });
+  //       const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+        
+  //       // 计算进度环的世界坐标
+  //       const ringX = x - containerWidth / 2;
+  //       const ringY = -(y - containerHeight / 2);
+        
+  //       ring.position.set(ringX, ringY, 0.2); // 置于最前方
+  //       scene.add(ring);
+        
+  //       console.log('[Three.js] 添加长按进度环:', { ringX, ringY, progress, level: longPressState.currentLevel });
+  //     }
+      
+  //     // 确保纹理已更新
+  //     videoTexture.needsUpdate = true;
+      
+  //     console.log('[Three.js] 准备渲染，场景对象数:', scene.children.length);
+      
+  //     // 渲染场景
+  //     renderer.render(scene, camera);
+      
+  //     console.log('[Three.js] 渲染完成');
+      
+  //     // 检查渲染器的canvas内容
+  //     const gl = renderer.getContext();
+  //     const pixels = new Uint8Array(4);
+  //     gl.readPixels(renderWidth / 2, renderHeight / 2, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  //     console.log('[Three.js] 中心像素值:', pixels);
+      
+  //     // 导出为图片
+  //     const dataURL = renderer.domElement.toDataURL('image/png');
+  //     setWebglScreenshot(dataURL);
+      
+  //     console.log('[Three.js] 截图完成，尺寸:', renderWidth, 'x', renderHeight);
+  //     console.log('[Three.js] 数据长度:', dataURL.length);
+  //     console.log('[Three.js] 数据预览:', dataURL.substring(0, 100) + '...');
+      
+  //     // 为了调试，也将渲染后的canvas临时添加到DOM
+  //     if (typeof document !== 'undefined') {
+  //       try {
+  //         const debugDiv = document.createElement('div');
+  //         debugDiv.style.position = 'fixed';
+  //         debugDiv.style.top = '10px';
+  //         debugDiv.style.right = '10px';
+  //         debugDiv.style.zIndex = '10000';
+  //         debugDiv.style.border = '2px solid red';
+  //         debugDiv.style.background = 'white';
+  //         debugDiv.style.padding = '5px';
+          
+  //         // 创建一个新的canvas并复制内容
+  //         const debugCanvas = document.createElement('canvas');
+  //         debugCanvas.width = renderWidth;
+  //         debugCanvas.height = renderHeight;
+  //         debugCanvas.style.width = '200px';
+  //         debugCanvas.style.height = '200px';
+          
+  //         const debugCtx = debugCanvas.getContext('2d');
+  //         if (debugCtx) {
+  //           debugCtx.drawImage(renderer.domElement, 0, 0);
+  //         }
+          
+  //         debugDiv.appendChild(debugCanvas);
+  //         document.body.appendChild(debugDiv);
+  //         console.log('[Three.js] 调试canvas已添加到DOM右上角（5秒后消失）');
+          
+  //         // 5秒后移除
+  //         setTimeout(() => {
+  //           if (document.body.contains(debugDiv)) {
+  //             document.body.removeChild(debugDiv);
+  //           }
+  //         }, 5000);
+  //       } catch (e) {
+  //         console.error('[Three.js] 无法创建调试canvas:', e);
+  //       }
+  //     }
+      
+  //     // 清理资源
+  //     geometry.dispose();
+  //     material.dispose();
+  //     videoTexture.dispose();
+  //     renderer.dispose();
+      
+  //     console.log('[Three.js] 资源清理完成');
+      
+  //   } catch (error) {
+  //     console.error('[Three.js] Three.js截图失败:', error);
+  //     alert(`Three.js截图失败: ${error instanceof Error ? error.message : String(error)}`);
+  //   }
+  // };
+
   // 5) 手指模式截屏函数（到达light级别时调用）
   const takeFingerScreenshot = async (fingerPos: {x: number, y: number}) => {
     if (longPressRef.current.hasScreenshot) {
@@ -774,6 +1891,8 @@ export default function Home() {
 
   // 6) 手指选择处理函数（OCR处理，使用已截好的屏）
   const onFingerSelection = async () => {
+    if (captureLockRef.current) { console.log('[Finger] capture busy, skip'); return; }
+    captureLockRef.current = true;
     if (!selectionBounds || !videoReady || !ocrReady || !worker) {
       console.log('[Finger] 条件不满足:', { 
         hasSelectionBounds: !!selectionBounds, 
@@ -792,89 +1911,37 @@ export default function Home() {
     
     console.log('[Finger] 开始OCR处理，使用已截屏区域:', selectionBounds);
     
-    setDebugInfo(`👆 手指模式: 选择区域 ${selectionBounds.width}×${selectionBounds.height}px`);
+    setDebugInfo(`👆 finger mode: selection area ${selectionBounds.width}×${selectionBounds.height}px`);
     
-    // 使用与原来相同的OCR逻辑，但使用已截屏的selectionBounds
+    // 使用Three.js渲染画面进行所见即所得截图
     try {
-      // 创建canvas用于截图
-      const canvas = document.createElement("canvas");
-      canvas.width = selectionBounds.width;
-      canvas.height = selectionBounds.height;
-      const ctx = canvas.getContext("2d")!;
-      
-      // 从overlay截图的逻辑（复用原有逻辑）
-      console.log('[Finger] 开始从overlay截取手指指向区域...');
-      
-      const overlay = overlayRef.current;
-      const video = videoRef.current;
-      if (!overlay || !video) {
-        console.log('[Finger] overlay或video引用缺失');
-        setIsProcessing(false);
+      const renderer = threeRendererRef.current;
+      const scene = threeSceneRef.current;
+      const camera = threeCameraRef.current;
+      const renderCanvas = renderer?.domElement;
+      if (!renderer || !scene || !camera || !renderCanvas) {
+        console.warn('[Finger] Three.js未就绪，回退旧截图逻辑');
+        // 若未就绪则保持旧路径（避免中断）
         return;
       }
       
-      // 获取尺寸信息
-      const overlayRect = overlay.getBoundingClientRect();
-      const videoRect = video.getBoundingClientRect();
-      
-      console.log('[Finger] 尺寸信息:', {
-        手指选择区域: selectionBounds,
-        overlay尺寸: { width: overlayRect.width, height: overlayRect.height },
-        video显示尺寸: { width: videoRect.width, height: videoRect.height },
-        当前变换: { scale: videoScale, translate: videoTranslate }
-      });
-      
-      // 创建临时canvas来绘制整个overlay内容
-      const tempCanvas = document.createElement("canvas");
-      tempCanvas.width = overlayRect.width;
-      tempCanvas.height = overlayRect.height;
-      const tempCtx = tempCanvas.getContext("2d")!;
-      
-      // 绘制video到临时canvas（包含所有变换）
-      tempCtx.save();
-      
-      // 应用与video相同的变换
-      tempCtx.translate(tempCanvas.width / 2, tempCanvas.height / 2);
-      tempCtx.scale(-1, 1); // 水平翻转
-      tempCtx.scale(videoScale, videoScale); // 缩放
-      tempCtx.translate(videoTranslate.x, videoTranslate.y); // 平移
-      tempCtx.translate(-tempCanvas.width / 2, -tempCanvas.height / 2);
-      
-      // 绘制video，保持原始宽高比
-      const videoAspect = video.videoWidth / video.videoHeight;
-      const canvasAspect = tempCanvas.width / tempCanvas.height;
-      
-      let drawWidth, drawHeight, drawX, drawY;
-      
-      if (videoAspect > canvasAspect) {
-        drawWidth = tempCanvas.width;
-        drawHeight = tempCanvas.width / videoAspect;
-        drawX = 0;
-        drawY = (tempCanvas.height - drawHeight) / 2;
-      } else {
-        drawHeight = tempCanvas.height;
-        drawWidth = tempCanvas.height * videoAspect;
-        drawX = (tempCanvas.width - drawWidth) / 2;
-        drawY = 0;
+      // 直接从Three渲染canvas截取所选区域（考虑DPR）
+      // 高分辨率导出（scale=2 或 3 可选）
+      // iPad等设备降级scale以避免OOM
+      const isIPad = /iPad|iPhone|iPod/.test(navigator.userAgent) || ((/Macintosh/.test(navigator.userAgent)) && (navigator.maxTouchPoints > 1));
+      const scale = isIPad ? 1.5 : 2;
+      const cropCanvas = captureWYSIWYGRegionHiRes(selectionBounds, scale) || captureWYSIWYGRegion(selectionBounds);
+      if (!cropCanvas) {
+        console.error('[Finger] WYSIWYG裁剪失败，画布为空');
+        setIsProcessing(false);
+        return;
       }
-      
-      tempCtx.drawImage(video, drawX, drawY, drawWidth, drawHeight);
-      tempCtx.restore();
-      
-      // 从临时canvas中提取选择区域
-      const safeLeft = Math.max(0, Math.min(selectionBounds.left, tempCanvas.width - 1));
-      const safeTop = Math.max(0, Math.min(selectionBounds.top, tempCanvas.height - 1));
-      const safeWidth = Math.min(selectionBounds.width, tempCanvas.width - safeLeft);
-      const safeHeight = Math.min(selectionBounds.height, tempCanvas.height - safeTop);
-      
-      const selectionImageData = tempCtx.getImageData(safeLeft, safeTop, safeWidth, safeHeight);
-      ctx.putImageData(selectionImageData, 0, 0);
-      
-      console.log('[Finger] 手指模式截图完成');
+      console.log('[Finger] 手指模式截图完成（Three.js WYSIWYG）');
       
       // 图像增强处理
       if (isEnhancementEnabled) {
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const ctx2d = cropCanvas.getContext('2d')!;
+        const imageData = ctx2d.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
         const data = imageData.data;
         
         for (let i = 0; i < data.length; i += 4) {
@@ -888,17 +1955,20 @@ export default function Home() {
           data[i] = data[i + 1] = data[i + 2] = enhanced;
         }
         
-        ctx.putImageData(imageData, 0, 0);
+        ctx2d.putImageData(imageData, 0, 0);
         console.log('[Finger] ✅ 图像增强完成');
       }
       
-      // 获取处理后的图像
-      const dataURL = canvas.toDataURL();
-      setCapturedImage(dataURL);
+      // 获取处理后的图像（改用所见即所得）
+      const imageDataUrl = cropCanvas.toDataURL();
+      // 推迟更新UI，避免阻塞主线程
+      setTimeout(() => {
+        try { setCapturedImage(imageDataUrl); } catch {}
+      }, 0);
       
       // OCR识别
       console.log('[Finger] 开始OCR识别...');
-      const { data: { text } } = await worker.recognize(canvas);
+      const { data: { text } } = await worker.recognize(cropCanvas);
       const picked = text.trim().slice(0, 400);
       
       console.log('[Finger] OCR识别结果:', { 
@@ -907,10 +1977,10 @@ export default function Home() {
         text: picked 
       });
       
-      setAnswer(`👆 手指模式调用LLM... (level: ${level})\n\n识别文字: ${picked || "(未检测到文字)"}`);
+      setAnswer(`👆 finger mode: call LLM... (level: ${level})\n\n识别文字: ${picked || "(未检测到文字)"}`);
       
       if(picked.length === 0) {
-        setAnswer("👆 手指模式: 未检测到文字");
+        setAnswer("👆 finger mode: no text detected");
         console.log('[Finger] 文本为空');
         return;
       }
@@ -919,7 +1989,7 @@ export default function Home() {
       const resp = await fetch("/api/llm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: picked || "No text", level, image: dataURL, streaming: isStreaming }),
+        body: JSON.stringify({ text: picked || "No text", level, image: imageDataUrl, streaming: isStreaming }),
       });
       
       if (!resp.ok) {
@@ -1000,7 +2070,7 @@ export default function Home() {
         const content = data.content || "No response";
         
         console.log('[Finger] LLM响应完成:', { contentLength: content.length });
-        setAnswer(`👆 手指模式结果:\n\n${content}`);
+        setAnswer(`👆 finger mode: result:\n\n${content}`);
         
         // 设置浮窗
         if (selectionBounds) {
@@ -1025,9 +2095,10 @@ export default function Home() {
       
     } catch (err: any) {
       console.error('[Finger] 处理失败:', err);
-      setAnswer(`👆 手指模式错误: ${err?.message || String(err)}`);
+      setAnswer(`👆 finger mode: error: ${err?.message || String(err)}`);
     } finally {
       setIsProcessing(false);
+      captureLockRef.current = false;
     }
   };
 
@@ -1105,13 +2176,7 @@ export default function Home() {
     
     setDebugInfo(`Click detected: ${e.pointerType} pressure:${e.pressure?.toFixed(2) || 'N/A'}`);
     
-    // 暂停视频，冻结画面
-    const video = videoRef.current!;
-    if (video && !video.paused) {
-      video.pause();
-      setIsVideoFrozen(true);
-      console.log('[Click] 视频已暂停，画面冻结');
-    }
+    // 不再暂停视频；Three.js实时渲染，直接从渲染canvas截取
     
     // 更新当前压力显示
     setCurrentPressure(e.pressure || 0);
@@ -1144,7 +2209,7 @@ export default function Home() {
     console.log('[OCR] 使用overlay直接截图方法');
     
     if (!calculatedBounds || calculatedBounds.width <= 5 || calculatedBounds.height <= 5) {
-      setAnswer("请先用Apple Pencil画出要识别的区域");
+      setAnswer("please use Apple Pencil to draw the area to be recognized");
       setIsProcessing(false);
       return;
     }
@@ -1157,7 +2222,7 @@ export default function Home() {
     
     // 图像增强函数
     const enhanceImage = (canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D) => {
-      console.log('[Enhancement] 开始图像增强处理...');
+      console.log('[Enhancement] start image enhancement processing...');
       
       // 获取图像数据
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -1394,35 +2459,44 @@ export default function Home() {
       videoSize: { width: v.videoWidth, height: v.videoHeight }
     });
 
-    // 调试：将canvas内容转为base64查看是否正常
-    let dataURL;
+    // 所见即所得：从Three.js渲染canvas裁切
+    const region = calculatedBounds || selectionBounds;
+    const isIPad = /iPad|iPhone|iPod/.test(navigator.userAgent) || ((/Macintosh/.test(navigator.userAgent)) && (navigator.maxTouchPoints > 1));
+    const scale = isIPad ? 1.5 : 2;
+    const cropSource = region ? (captureWYSIWYGRegionHiRes(region, scale) || captureWYSIWYGRegion(region)) : null;
+    if (!cropSource) {
+      setAnswer('Three.js renderer not ready');
+      setIsProcessing(false);
+      return;
+    }
+    let imageDataUrl;
     try {
-      dataURL = canvas.toDataURL();
-      console.log('[Click] Canvas转换为DataURL成功，长度:', dataURL.length);
-      console.log('[Click] DataURL前缀:', dataURL.substring(0, 50));
-    } catch (toDataURLError: any) {
-      console.error('[Click] Canvas转换为DataURL失败:', toDataURLError);
-      setAnswer(`Error: Canvas to DataURL failed - ${toDataURLError.message || String(toDataURLError)}`);
-      setCapturedImage("");
+      imageDataUrl = cropSource.toDataURL();
+      console.log('[Click] WYSIWYG截图成功，长度:', imageDataUrl.length);
+    } catch (e: any) {
+      console.error('[Click] DataURL失败:', e);
+      setIsProcessing(false);
       return;
     }
     
     // 根据设置决定是否进行图像增强
     if (isEnhancementEnabled) {
-      enhanceImage(canvas, ctx);
+      const ctx = cropSource.getContext('2d')!;
+      enhanceImage(cropSource, ctx);
       console.log('[Enhancement] ✅ 图像增强已应用');
     } else {
       console.log('[Enhancement] ⚪ 图像增强已禁用');
     }
     
     // 获取处理后的图像用于显示
-    const finalDataURL = canvas.toDataURL();
-    setCapturedImage(finalDataURL);
+    setTimeout(() => {
+      try { setCapturedImage(imageDataUrl); } catch {}
+    }, 0);
     
     console.log('[Enhancement] 图像增强完成，开始OCR识别...');
 
     try {
-      const { data: { text } } = await worker.recognize(canvas);
+      const { data: { text } } = await worker.recognize(cropSource);
       const picked = text.trim().slice(0, 400);
       console.log('[OCR] 识别结果:', { 
         originalLength: text.length, 
@@ -1442,7 +2516,7 @@ export default function Home() {
       const resp = await fetch("/api/llm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: picked || "No text", level, image: dataURL, streaming: isStreaming }),
+        body: JSON.stringify({ text: picked || "No text", level, image: imageDataUrl, streaming: isStreaming }),
       });
 
       console.log('[LLM] API 调用状态:', resp.status);
@@ -1578,9 +2652,9 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-gray-50 p-4">
+    <main className="min-h-screen bg-white p-4">
    
-      <h1 className="text-xl font-semibold mb-3">PressureLens — Web</h1>
+      <h1 className="text-xl font-semibold mb-3 text-gray-600">PressureLens — Web</h1>
 
       <div className="mb-2 text-sm text-gray-600">
         Video: {videoReady ? "✅ ready" : "⏳ loading"} ·
@@ -1595,8 +2669,63 @@ export default function Home() {
           </span>
         )}
         {debugInfo && <div className="mt-1 text-xs text-blue-600">🔍 {debugInfo}</div>}
-        {deviceInfo && <div className="mt-1 text-xs text-purple-600">📱 {deviceInfo}</div>}
+        {/* {deviceInfo && <div className="mt-1 text-xs text-purple-600">📱 {deviceInfo}</div>} */}
       </div>
+
+      {/* 数据采集开关 & 简单统计 */}
+      <div className="mb-3 flex flex-wrap gap-3 items-center text-sm">
+        <div className="flex items-center gap-2">
+          <span className="text-gray-600">data logging:</span>
+          <button
+            onClick={() => setIsLoggingEnabled((v) => !v)}
+            className={`px-3 py-1 rounded text-sm transition-colors ${
+              isLoggingEnabled ? "bg-emerald-500 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+            }`}
+          >
+            {isLoggingEnabled ? "✅ on" : "⏸️ off"}
+          </button>
+        </div>
+        <div className="text-xs text-gray-600">
+          {(() => {
+            const s = sessionLogger.getSummary();
+            return (
+              <>
+                samples: <span className="font-semibold">{s.pointerSamples}</span> ·
+                voice: <span className="font-semibold ml-1">{s.voiceAnnotations}</span> ·
+                selected topics: <span className="font-semibold ml-1">{s.selectedTopics}</span> ·
+                page topics: <span className="font-semibold ml-1">{s.hasPageOcr ? "yes" : "no"}</span>
+              </>
+            );
+          })()}
+        </div>
+        <button
+          onClick={() => sessionLogger.exportJson(deviceInfo)}
+          className="ml-auto px-3 py-1 rounded text-xs bg-black text-white hover:bg-gray-900"
+        >
+          download session JSON
+        </button>
+        <div className="w-full sm:w-auto">
+          <VoiceTopicRecorder
+            onAnnotation={(ann) => {
+              sessionLogger.addVoiceAnnotation(ann);
+              setLastVoiceAnnotation(ann);
+              // 同时将语音内容作为一个“选定的 topic”记录下来
+              if (ann.transcript && ann.transcript.trim()) {
+                sessionLogger.addSelectedTopic({
+                  id: `voice-topic-${ann.timestampStart}-${Math.random().toString(36).slice(2, 6)}`,
+                  timestamp: ann.timestampEnd,
+                  text: ann.transcript.trim(),
+                  source: "voice",
+                });
+                setLastSelectedTopic(ann.transcript.trim());
+                setTimeout(() => setLastSelectedTopic(null), 1500);
+              }
+            }}
+          />
+        </div>
+      </div>
+
+      
 
       {/* 压力条显示 */}
       {(
@@ -1664,8 +2793,103 @@ export default function Home() {
         </button>
       </div>
 
+      {/* 兴趣度检测控制 */}
+      <div className="mb-3 flex gap-2 items-center">
+        <span className="text-sm text-gray-600">intention detection:</span>
+        <button
+          onClick={() => {
+            setIsInterestDetectionEnabled(!isInterestDetectionEnabled);
+            if (!isInterestDetectionEnabled) {
+              setMovementTrail([]);
+              setInterestHeatmap(new Map());
+              setCurrentInterestScore(0);
+              setInterestAnalysis(null);
+            }
+          }}
+          className={`px-3 py-1 rounded text-sm transition-colors ${
+            isInterestDetectionEnabled
+              ? 'bg-purple-500 text-white'
+              : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+          }`}
+        >
+          {isInterestDetectionEnabled ? '✅ enabled' : '⏸️ enabled'}
+        </button>
+        {isInterestDetectionEnabled && (
+          <div className="text-xs text-purple-600 ml-2">
+            realtime speed: {stableRealtimeSpeedPxPerSec.toFixed(1)} px/s
+          </div>
+        )}
+        {/* {isInterestDetectionEnabled && (
+          <div className="text-xs text-purple-600 ml-2">
+            当前兴趣度: {currentInterestScore.toFixed(1)}%
+          </div>
+        )} */}
+      </div>
+
+      {/* 手指长按自动调用 LLM 开关 */}
+      <div className="mb-3 flex gap-2 items-center">
+        <span className="text-sm text-gray-600">finger long-press LLM:</span>
+        <button
+          onClick={() => setIsFingerLongPressLLMEnabled((v) => !v)}
+          className={`px-3 py-1 rounded text-sm transition-colors ${
+            isFingerLongPressLLMEnabled
+              ? "bg-red-500 text-white"
+              : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+          }`}
+        >
+          {isFingerLongPressLLMEnabled ? "✅ enabled" : "⏸️ disabled"}
+        </button>
+        <span className="text-xs text-gray-500">
+          {isFingerLongPressLLMEnabled
+            ? "finger hold will auto OCR + LLM"
+            : "no auto OCR/LLM on finger hold"}
+        </span>
+      </div>
+
+      {/* 兴趣度分析结果显示 */}
+      {isInterestDetectionEnabled && interestAnalysis && (
+        <div className="mb-3 p-3 bg-purple-50 rounded-lg border border-purple-200">
+          {/* <div className="text-sm text-purple-700 mb-2">
+            🎯 兴趣度分析结果
+          </div>
+          <div className="text-xs text-gray-600 space-y-1">
+            <div>总兴趣度分数: {interestAnalysis.totalInterestScore.toFixed(1)}%</div>
+            <div>平均移动速度: {interestAnalysis.averageSpeed.toFixed(2)} px/ms</div>
+            <div>焦点区域数量: {interestAnalysis.focusAreas.length}</div>
+            <div>轨迹点数: {movementTrail.length}</div>
+            <div>热点区域数: {interestHeatmap.size}</div>
+            {interestAnalysis.topKeywords.length > 0 && (
+              <div>
+                热门关键词: {interestAnalysis.topKeywords.map(k => k.keyword).join(', ')}
+              </div>
+            )}
+          </div> */}
+          
+          {/* 兴趣度趋势图 */}
+          {/* <div className="mt-2">
+            <div className="text-xs text-purple-600 mb-1">兴趣度趋势:</div>
+            <div className="flex items-end space-x-1 h-8">
+              {movementTrail.slice(-20).map((point, index) => {
+                const height = Math.min((point.speed > 0 ? 100 / (point.speed + 1) : 50) / 10, 8);
+                return (
+                  <div
+                    key={index}
+                    className="bg-purple-400 rounded-t"
+                    style={{
+                      width: '3px',
+                      height: `${height}px`,
+                      opacity: 0.8 - (index * 0.03)
+                    }}
+                  />
+                );
+              })}
+            </div>
+          </div> */}
+        </div>
+      )}
+
       {/* 手指检测状态显示 */}
-      {handDetectionMode === 'finger' && (
+      {/* {handDetectionMode === 'finger' && (
         <div className="mb-3 p-3 bg-green-50 rounded-lg border border-green-200">
           <div className="text-sm text-green-700 mb-2">
             📷 长按模式: {fingerTipPosition ? '✅ 检测到手指' : '⏳ 寻找手指中...'}
@@ -1682,7 +2906,6 @@ export default function Home() {
             <br/>• 3.5秒以上: Hard级别 (详细分析+建议)
           </div>
           
-          {/* 长按状态显示 */}
           {longPressState.isActive && (
             <div className="mt-2 p-2 bg-white rounded border">
               <div className="text-xs text-gray-700">
@@ -1700,15 +2923,11 @@ export default function Home() {
             </div>
           )}
           
-          {!fingerTipPosition && (
-            <div className="mt-2 text-xs text-amber-600">
-              {/* 💡 提示: 确保光线充足，将手指清晰地伸入摄像头视野内 */}
-            </div>
-          )}
+    
           
-          {/* 手指检测精度配置 */}
+         
           <div className="mt-3 p-2 bg-gray-50 rounded border">
-            {/* <div className="text-xs font-medium text-gray-700 mb-2"></div> */}
+
             
             <div className="grid grid-cols-1 gap-2 text-xs">
               <div className="flex items-center gap-2">
@@ -1804,14 +3023,10 @@ export default function Home() {
               </div>
             </div>
             
-            {/* <div className="mt-2 text-xs text-gray-500">
-              • 检测阈值高 = 更准确但可能漏检 | 低 = 更敏感但可能误检<br/>
-              • 跟踪阈值高 = 更稳定但反应慢 | 低 = 更灵敏但可能抖动<br/>
-              • 精确模式 = 更准确但更耗性能 | 快速模式 = 性能好但精度略低
-            </div> */}
+     
           </div>
         </div>
-      )}
+      )} */}
 
       {/* Apple Pencil 1代手动level切换 */}
       <div className="mb-3 flex gap-2">
@@ -1870,6 +3085,49 @@ export default function Home() {
           {isEnhancementEnabled ? '(contrast + grayscale + binarization)' : '(raw camera image)'}
         </span>
       </div>
+      {/* 行距补偿（三挡） */}
+      <div className="mb-3 flex gap-2 items-center">
+        <span className="text-sm text-gray-600">warp:</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">0</span>
+          {(() => {
+            const opts = [0, 0.18, 0.50];
+            const currentIndex = (() => {
+              let idx = 0, best = Infinity;
+              for (let i = 0; i < opts.length; i++) {
+                const d = Math.abs(opts[i] - warpCompensation);
+                if (d < best) { best = d; idx = i; }
+              }
+              return idx;
+            })();
+            return (
+              <input
+                type="range"
+                min="0"
+                max="2"
+                step="1"
+                value={currentIndex}
+                onChange={(e) => {
+                  const i = parseInt(e.target.value);
+                  const val = opts[i];
+                  setWarpCompensation(val);
+                  // setDebugInfo(`🔧 warp: ${i===0?'0':i===1?'0.18':'0.5'} (${val.toFixed(2)})`);
+                }}
+                className="w-32 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
+                style={{
+                  background: `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${(currentIndex/2)*100}%, #e5e7eb ${(currentIndex/2)*100}%, #e5e7eb 100%)`
+                }}
+              />
+            );
+          })()}
+          <span className="text-xs text-gray-500">0.5</span>
+          <span className="text-xs font-medium text-blue-600 min-w-[3rem]">
+            {warpCompensation.toFixed(2)}
+          </span>
+        </div>
+        <span className="text-xs text-gray-500">
+        </span>
+      </div>
 
       {/* 透视强度控制 */}
       <div className="mb-3 flex gap-2 items-center">
@@ -1884,7 +3142,7 @@ export default function Home() {
             onChange={(e) => {
               const value = parseInt(e.target.value);
               setPerspectiveStrength(value);
-              setDebugInfo(`🔄 透视强度: ${value}% (${(value * 0.3).toFixed(1)}度)`);
+              setDebugInfo(`🔄 perspective strength: ${value}% (${(value * 0.3).toFixed(1)}度)`);
             }}
             className="w-32 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
             style={{
@@ -1909,30 +3167,34 @@ export default function Home() {
            touchAction: 'pan-x pan-y pinch-zoom' // 允许平移和缩放
          }}
         >
-                  {/* 透视变换容器 */}
-        <div 
-          style={{
-            width: '100%',
-            height: '100%',
-            transform: `perspective(800px) rotateX(${perspectiveStrength * 0.3}deg)`,
-            transformOrigin: 'center top', // 透视变换以顶部为原点
-            transition: 'transform 0.1s ease-out'
-          }}
-        >
+          {/* 隐藏的video元素（仅用作Three.js纹理源） */}
           <video 
             ref={videoRef} 
             className="video-element" 
             playsInline 
             style={{
-              pointerEvents: 'none', // 禁用video上的事件，只在overlay上处理
-              transform: `scaleX(-1) scale(${videoScale}) translate(${videoTranslate.x}px, ${videoTranslate.y}px)`, // 左右翻转+缩放+平移
-              transformOrigin: 'center center', // 其他变换以中心为原点，保持原有逻辑
-              width: '500px',
-              height: '500px',
-              transition: 'transform 0.1s ease-out'
+              display: 'none' // 隐藏原生video，使用Three.js渲染
             }}
           />
-        </div>
+          
+          {/* Three.js渲染canvas（显示实时3D效果） */}
+          <canvas
+            ref={threeCanvasRef}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '500px',
+              height: '500px',
+              pointerEvents: 'none' // 不接收事件，由overlay处理
+            }}
+          />
+        {/* OCR 叠加层（仅绘制词框） */}
+        <canvas
+          ref={ocrOverlayCanvasRef}
+          className="absolute inset-0 pointer-events-none"
+          style={{ width: '500px', height: '500px' }}
+        />
         {/* 盖在视频上用于接收手势事件 */}
         <div
           ref={overlayRef}
@@ -1960,7 +3222,7 @@ export default function Home() {
             if (e.pointerType === "pen") {
               // Apple Pencil - 只用于绘制，不处理拖拽
               console.log('[Pencil] Apple Pencil按下，准备绘制');
-              setDebugInfo(`✏️ Apple Pencil: 压力:${e.pressure?.toFixed(2) || 'N/A'}`);
+              setDebugInfo(`✏️ Apple Pencil: pressure:${e.pressure?.toFixed(2) || 'N/A'}`);
             } else if (e.pointerType === "touch") {
               // 手指 - 用于缩放拖拽
               console.log('[Finger] 手指按下，准备手势操作');
@@ -1968,7 +3230,7 @@ export default function Home() {
               (e.currentTarget as any).lastPointerY = e.clientY;
               (e.currentTarget as any).initialTranslate = {...videoTranslate};
               (e.currentTarget as any).fingerPointerId = e.pointerId;
-              setDebugInfo(`👆 手指按下: (${e.clientX.toFixed(0)}, ${e.clientY.toFixed(0)})`);
+              setDebugInfo(`👆 finger down: (${e.clientX.toFixed(0)}, ${e.clientY.toFixed(0)})`);
             }
           }}
           onTouchStart={(e) => {
@@ -1983,7 +3245,7 @@ export default function Home() {
               (e.currentTarget as any).initialDistance = distance;
               (e.currentTarget as any).initialScale = videoScale;
               console.log('[Zoom] 双指缩放开始:', { distance, currentScale: videoScale });
-              setDebugInfo(`🔍 双指缩放开始 (${distance.toFixed(0)}px)`);
+              setDebugInfo(`🔍 zoom start (${distance.toFixed(0)}px)`);
             }
           }}
           onPointerMove={(e) => {
@@ -2009,7 +3271,7 @@ export default function Home() {
                   x: initialTranslate.x - deltaX / videoScale, // 注意这里是减号
                   y: initialTranslate.y + deltaY / videoScale
                 });
-                setDebugInfo(`📱 手指拖拽: (${deltaX.toFixed(0)}, ${deltaY.toFixed(0)}) 缩放:${(videoScale * 100).toFixed(0)}%`);
+                setDebugInfo(`📱 finger drag: (${deltaX.toFixed(0)}, ${deltaY.toFixed(0)}) zoom:${(videoScale * 100).toFixed(0)}%`);
               }
             }
           }}
@@ -2032,7 +3294,7 @@ export default function Home() {
                 const scaleChange = distance / initialDistance;
                 const newScale = Math.max(0.1, Math.min(10, initialScale * scaleChange));
                 setVideoScale(newScale);
-                setDebugInfo(`🔍 双指缩放: ${(newScale * 100).toFixed(0)}%`);
+                setDebugInfo(`🔍 zoom: ${(newScale * 100).toFixed(0)}%`);
                 console.log('[Zoom] 双指缩放:', newScale);
               }
             }
@@ -2041,7 +3303,7 @@ export default function Home() {
           onTouchEnd={(e) => {
             if (e.touches.length === 0) {
               // 所有手指离开
-              setDebugInfo(`✅ 手势结束 - 缩放: ${(videoScale * 100).toFixed(0)}%`);
+              setDebugInfo(`✅ zoom: ${(videoScale * 100).toFixed(0)}%`);
             }
           }}
           className="absolute inset-0 z-10 cursor-crosshair select-none"
@@ -2058,18 +3320,37 @@ export default function Home() {
           {/* 手指检测模式的视觉反馈 */}
           {handDetectionMode === 'finger' && fingerTipPosition && (
             <>
-              {/* 手指指尖标记 */}
+              {/* 手指指尖标记（始终显示） */}
               <div
                 className="absolute w-3 h-3 bg-red-500 rounded-full pointer-events-none border-2 border-white shadow-lg z-20"
                 style={{
                   left: `${fingerTipPosition.x - 8}px`,
                   top: `${fingerTipPosition.y - 8}px`,
-                  animation: longPressState.isActive ? 'none' : 'pulse 2s infinite'
+                  animation: isFingerLongPressLLMEnabled && longPressState.isActive ? 'none' : 'pulse 2s infinite'
                 }}
               />
+
+              {/* 最近 OCR 词调试标签 */}
+              {debugNearestWord && (
+                <div
+                  className="absolute pointer-events-none z-30 bg-black bg-opacity-75 text-white text-xs px-2 py-1 rounded shadow-lg"
+                  style={{
+                    left: `${fingerTipPosition.x + 16}px`,
+                    top: `${fingerTipPosition.y - 24}px`,
+                    transform: 'translateX(-50%)',
+                    maxWidth: '220px',
+                    whiteSpace: 'nowrap',
+                    textOverflow: 'ellipsis',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <span className="font-semibold">nearest:</span>{' '}
+                  <span>{debugNearestWord.text || '(no text)'}</span>
+                </div>
+              )}
               
-              {/* 长按进度圆环 */}
-              {longPressRef.current.startPosition && longPressState.currentDuration > 0 && (
+              {/* 长按进度圆环（仅在开启 finger long-press LLM 时显示） */}
+              {isFingerLongPressLLMEnabled && longPressRef.current.startPosition && longPressState.currentDuration > 0 && (
                 <div
                   className="absolute pointer-events-none z-25"
                   style={{
@@ -2125,17 +3406,17 @@ export default function Home() {
                   >
                     <div>{(longPressState.currentDuration / 1000).toFixed(1)}s</div>
                     {longPressState.currentLevel === 'hard' && !longPressRef.current.hasTriggered && (
-                      <div className="text-yellow-300 animate-pulse">即将自动触发</div>
+                      <div className="text-yellow-300 animate-pulse"> auto trigger</div>
                     )}
                     {longPressState.currentLevel !== 'hard' && longPressState.currentDuration >= longPressConfig.autoTriggerDelay && (
-                      <div className="text-green-300">移开手指确认</div>
+                      <div className="text-green-300"> release finger to confirm </div>
                     )}
                   </div>
                 </div>
               )}
               
-              {/* 预览选择区域 */}
-              {(() => {
+              {/* 预览选择区域（仅在开启 finger long-press LLM 时显示） */}
+              {isFingerLongPressLLMEnabled && (() => {
                 const previewArea = calculateFingerSelectionArea(fingerTipPosition);
                 return (
                   <div
@@ -2173,6 +3454,94 @@ export default function Home() {
               })()}
             </>
           )}
+
+          {/* 兴趣度检测可视化 */}
+          {isInterestDetectionEnabled && (
+            <>
+              {/* 移动轨迹可视化 */}
+              {/* {movementTrail.length > 1 && (
+                <svg className="absolute inset-0 w-full h-full pointer-events-none z-10">
+                  <path
+                    d={`M ${movementTrail.map(p => `${p.x},${p.y}`).join(' L ')}`}
+                    stroke="#8B5CF6"
+                    strokeWidth="2"
+                    fill="none"
+                    strokeDasharray="3,3"
+                    opacity="0.6"
+                  />
+               
+                  {movementTrail.slice(-20).map((point, index) => (
+                    <circle
+                      key={index}
+                      cx={point.x}
+                      cy={point.y}
+                      r="2"
+                      fill="#8B5CF6"
+                      opacity={0.8 - (index * 0.03)}
+                    />
+                  ))}
+                </svg>
+              )} */}
+
+              {/* 兴趣热点可视化 */}
+              {/* {Array.from(interestHeatmap.entries()).map(([key, score]) => {
+                const [gridX, gridY] = key.split(',').map(Number);
+                const x = gridX * interestDetectionConfig.heatmapGridSize;
+                const y = gridY * interestDetectionConfig.heatmapGridSize;
+                const opacity = Math.min(score / 100, 0.8);
+                
+                return (
+                  <div
+                    key={key}
+                    className="absolute pointer-events-none z-5"
+                    style={{
+                      left: `${x - 15}px`,
+                      top: `${y - 15}px`,
+                      width: '30px',
+                      height: '30px',
+                      borderRadius: '50%',
+                      background: `radial-gradient(circle, rgba(139, 92, 246, ${opacity}) 0%, rgba(139, 92, 246, ${opacity * 0.3}) 70%, transparent 100%)`,
+                      animation: 'pulse 2s infinite'
+                    }}
+                  />
+                );
+              })} */}
+
+              {/* 当前兴趣度分数显示 */}
+              {/* {fingerTipPosition && currentInterestScore > 5 && (
+                <div
+                  className="absolute pointer-events-none z-20 bg-purple-500 text-white text-xs px-2 py-1 rounded shadow-lg"
+                  style={{
+                    left: `${fingerTipPosition.x + 20}px`,
+                    top: `${fingerTipPosition.y - 30}px`,
+                    transform: 'translateX(-50%)'
+                  }}
+                >
+                  兴趣度: {currentInterestScore.toFixed(1)}%
+                </div>
+              )} */}
+
+              {/* 焦点区域高亮 */}
+              {/* {interestAnalysis && interestAnalysis.focusAreas.map((area, index) => (
+                <div
+                  key={index}
+                  className="absolute pointer-events-none z-15 border-2 border-purple-400 rounded-lg"
+                  style={{
+                    left: `${area.x - area.radius}px`,
+                    top: `${area.y - area.radius}px`,
+                    width: `${area.radius * 2}px`,
+                    height: `${area.radius * 2}px`,
+                    opacity: Math.min(area.score / 100, 0.6),
+                    animation: 'pulse 3s infinite'
+                  }}
+                >
+                  <div className="absolute -top-6 left-1/2 transform -translate-x-1/2 bg-purple-500 text-white text-xs px-2 py-1 rounded">
+                    热点 {area.score.toFixed(0)}%
+                  </div>
+                </div>
+              ))} */}
+            </>
+          )} 
 
           {/* Apple Pencil 绘制路径可视化 */}
           {handDetectionMode === 'pencil' && drawingPath.length > 1 && (() => {
@@ -2315,10 +3684,95 @@ export default function Home() {
         )}
       </div>
 
-      <div className="mt-4 p-3 rounded-lg border bg-white max-w-md whitespace-pre-wrap text-sm">
+      <div className="mt-4 p-3 rounded-lg border bg-white max-w-md whitespace-pre-wrap text-sm text-gray-600">
         <div className="font-medium mb-1">Response</div>
         {answer || "Tap the video to OCR the region under your pen, then call LLM."}
       </div>
+
+      {/* 主页：可视区域 OCR 操作 */}
+      <div className="mt-4 flex gap-2 flex-wrap">
+        <button
+          onClick={runRegionOCR}
+          className="px-3 py-2 rounded-md text-white disabled:opacity-50"
+          style={{ background: '#111827' }}
+        >
+          OCR Region (Whole Frame)
+        </button>
+        <button
+          onClick={clearRegionOCR}
+          disabled={!ocrWordsInRegion}
+          className="px-3 py-2 rounded-md border disabled:opacity-50"
+        >
+          Clear OCR Region
+        </button>
+      </div>
+
+      {/* Region OCR 调试：仅展示 OCR Region 按钮触发时送入OCR的图片和识别文本 */}
+      {(regionCapturedImage || regionRecognizedText) && (
+        <div className="mt-2 p-3 rounded-lg border bg-white max-w-md">
+          <div className="font-medium mb-2">🧪 Region OCR Debug</div>
+          {regionCapturedImage && (
+            <img
+              src={regionCapturedImage}
+              alt="Region OCR Image"
+              className="border rounded max-w-full h-auto"
+              style={{ maxHeight: '200px' }}
+            />
+          )}
+          {regionRecognizedText && (
+            <div className="mt-2 text-xs text-gray-800 whitespace-pre-wrap break-words">
+              {regionRecognizedText}
+            </div>
+          )}
+          {regionTopicsLoading && (
+            <div className="mt-2 text-xs text-gray-500">
+              Generating topics (for recommendation JSON)...
+            </div>
+          )}
+          {regionTopicsError && (
+            <div className="mt-2 text-xs text-red-500">
+              {regionTopicsError}
+            </div>
+          )}
+          {regionTopics && regionTopics.length > 0 && (
+            <div className="mt-2 text-xs text-gray-800">
+              <div className="font-medium mb-1">Topics (LLM JSON for recommender):</div>
+              <div className="flex flex-wrap gap-2 mt-1">
+                {regionTopics.map((t, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => {
+                      const id = `topic-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`;
+                      sessionLogger.addSelectedTopic({
+                        id,
+                        timestamp: Date.now(),
+                        text: t.text,
+                        source: "page_topic",
+                      });
+                      setLastSelectedTopic(t.text);
+                      setTimeout(() => setLastSelectedTopic(null), 1500);
+                    }}
+                    className="px-2 py-1 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 text-[11px]"
+                  >
+                    <span className="font-semibold">{t.text}</span>
+                    {typeof t.weight === "number" && (
+                      <span className="ml-1 text-gray-500">
+                        ({t.weight.toFixed(2)})
+                      </span>
+                    )}
+                    {t.category && (
+                      <span className="ml-1 text-gray-400">
+                        [{t.category}]
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 显示捕获的图像 */}
       {capturedImage && (
@@ -2342,14 +3796,23 @@ export default function Home() {
         </div>
       )}
 
+      {/* Topic 选择 toast */}
+      {lastSelectedTopic && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50">
+          <div className="px-3 py-2 rounded-full bg-black bg-opacity-80 text-white text-xs shadow-lg">
+            topic selected: <span className="font-semibold">{lastSelectedTopic}</span>
+          </div>
+        </div>
+      )}
+
       {/* 测试按钮 */}
-      <div className="mt-4 flex gap-2">
+      <div className="mt-4 flex gap-2 flex-wrap">
         <button
           onClick={async () => {
             console.log('[Test] 测试 OCR 功能');
-            setDebugInfo('测试模式：模拟点击');
+            setDebugInfo('test mode: simulate click');
             if (!ocrReady || !worker) {
-              setAnswer("OCR 还未就绪");
+              setAnswer("OCR not ready");
               return;
             }
             
@@ -2365,12 +3828,12 @@ export default function Home() {
             ctx.fillText("Hello World Test", 50, 50);
             
             try {
-              setAnswer("测试 OCR 中...");
+              setAnswer("test OCR...");
               const { data: { text } } = await worker.recognize(canvas);
-              setAnswer(`测试成功！识别结果: "${text.trim()}"`);
+              setAnswer(`test success! recognized text: "${text.trim()}"`);
               console.log('[Test] OCR 测试成功:', text);
             } catch (err: any) {
-              setAnswer(`测试失败: ${err.message}`);
+              setAnswer(`test failed: ${err.message}`);
               console.error('[Test] OCR 测试失败:', err);
             }
           }}
@@ -2378,6 +3841,15 @@ export default function Home() {
         >
           🧪 test OCR
         </button>
+        
+       
+        {/* <button
+          onClick={testWebGLScreenshot}
+          className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
+          title="Three.js 3D渲染截图（真实3D变换，iPad兼容）"
+        >
+          🎮 test Three.js
+        </button> */}
         
         <button
           onClick={() => {
@@ -2396,12 +3868,12 @@ export default function Home() {
             setVideoScale(1);
             setVideoTranslate({x: 0, y: 0});
             setPerspectiveStrength(0);
-            setDebugInfo('🔄 视频变换已全部重置');
+            setDebugInfo('🔄 reset');
             console.log('[Reset] 重置缩放、位置和透视');
           }}
           className="px-4 py-2 bg-indigo-500 text-white rounded hover:bg-indigo-600 text-sm"
         >
-          🔄 重置变换
+          🔄 reset
         </button>
         
         
@@ -2459,6 +3931,32 @@ export default function Home() {
         </div>
       </div> */}
 
+ 
+
+      {/* 显示WebGL测试截图 */}
+      {webglScreenshot && (
+        <div className="mt-4 p-3 rounded-lg border bg-white max-w-md">
+          <div className="font-medium mb-2">🎮 Three.js 3D渲染截图</div>
+          <img 
+            src={webglScreenshot} 
+            alt="Three.js 3D Render Screenshot" 
+            className="border rounded max-w-full h-auto"
+            style={{ maxHeight: '300px' }}
+          />
+          <div className="text-xs text-gray-500 mt-1">
+            使用Three.js进行真实3D渲染，完全等同于你看到的效果（包含视频、选择框、长按进度环等所有元素）
+          </div>
+          <div className="text-xs text-blue-600 mt-1">
+            ✅ iPad完美兼容 | ✅ 真实3D透视变换 | ✅ 2倍高分辨率 | ✅ 硬件加速 | ✅ 包含所有overlay元素
+          </div>
+          <button
+            onClick={() => setWebglScreenshot("")}
+            className="mt-2 px-2 py-1 bg-gray-500 text-white rounded text-xs hover:bg-gray-600"
+          >
+            Clear
+          </button>
+        </div>
+      )}
 
     </main>
   );
