@@ -26,6 +26,8 @@ export default function Home() {
   const [warpCompensation, setWarpCompensation] = useState<number>(0.5); // 0~0.5 建议范围，0为关闭
   // 用 ref 保存最新的 warpCompensation，避免 MediaPipe 回调里闭包拿到旧值
   const warpCompensationRef = useRef<number>(warpCompensation);
+  // 用 ref 保存 finger long-press LLM 的开关状态，避免 MediaPipe 回调里拿到旧值
+  const isFingerLongPressLLMEnabledRef = useRef<boolean>(true);
   const offscreenRendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const captureLockRef = useRef<boolean>(false);
@@ -218,6 +220,48 @@ export default function Home() {
 
   // 调试用：当前指尖最近的 OCR 词
   const [debugNearestWord, setDebugNearestWord] = useState<NearestWordInfo | null>(null);
+
+  // ===== 采样用 refs：保证定时器里永远读到最新值，而不依赖 effect 频繁重建 =====
+  const fingerTipPositionRef = useRef<{x: number; y: number} | null>(null);
+  const ocrWordsInRegionRef = useRef<WordBBox[] | null>(null);
+  const ocrRegionRef = useRef<{left: number; top: number; width: number; height: number} | null>(null);
+  const ocrScaleRef = useRef<number | null>(null);
+  const handDetectionModeRef = useRef<'pencil' | 'finger'>('pencil');
+  const currentPressureRef = useRef<number>(0);
+  const levelRef = useRef<Level>('light');
+  const currentInterestScoreRef = useRef<number>(0);
+
+  useEffect(() => {
+    fingerTipPositionRef.current = fingerTipPosition;
+  }, [fingerTipPosition]);
+
+  useEffect(() => {
+    ocrWordsInRegionRef.current = ocrWordsInRegion;
+  }, [ocrWordsInRegion]);
+
+  useEffect(() => {
+    ocrRegionRef.current = ocrRegion;
+  }, [ocrRegion]);
+
+  useEffect(() => {
+    ocrScaleRef.current = ocrScale;
+  }, [ocrScale]);
+
+  useEffect(() => {
+    handDetectionModeRef.current = handDetectionMode;
+  }, [handDetectionMode]);
+
+  useEffect(() => {
+    currentPressureRef.current = currentPressure;
+  }, [currentPressure]);
+
+  useEffect(() => {
+    levelRef.current = level;
+  }, [level]);
+
+  useEffect(() => {
+    currentInterestScoreRef.current = currentInterestScore;
+  }, [currentInterestScore]);
   
   // 指读数据采样（约 10Hz）：记录指尖位置 + 最近 OCR 词框
   useEffect(() => {
@@ -227,70 +271,72 @@ export default function Home() {
     let timer: number | undefined;
 
     const tick = () => {
-      const pointer = fingerTipPosition;
-      if (
-        pointer &&
-        ocrWordsInRegion &&
-        ocrWordsInRegion.length > 0 &&
-        ocrRegion &&
-        ocrScale
-      ) {
-        const t0 = (typeof performance !== "undefined" && performance.now)
-          ? performance.now()
-          : Date.now();
+      const pointer = fingerTipPositionRef.current;
+      const words = ocrWordsInRegionRef.current;
+      const region = ocrRegionRef.current;
+      const scale = ocrScaleRef.current;
+      const mode = handDetectionModeRef.current;
+      const pressure = currentPressureRef.current;
+      const lvl = levelRef.current;
+      const interest = currentInterestScoreRef.current;
 
-        const nearest = getNearestOcrWord(
-          ocrWordsInRegion,
-          ocrRegion,
-          ocrScale,
-          pointer,
-          { maxDistancePx: Infinity }
-        );
+      if (pointer) {
+        let nearest: NearestWordInfo | null = null;
 
-        const t1 = (typeof performance !== "undefined" && performance.now)
-          ? performance.now()
-          : Date.now();
-        const dt = t1 - t0;
-        // 在 Next 开发模式下，这个 log 会同时出现在浏览器控制台和 dev server 终端里
-        if (dt > 0.1) {
-          console.log(
-            "[NearestWord][perf] cost:",
-            dt.toFixed(3),
-            "ms",
-            "| words:",
-            ocrWordsInRegion.length
+        if (words && words.length > 0 && region && scale) {
+          const t0 = (typeof performance !== "undefined" && performance.now)
+            ? performance.now()
+            : Date.now();
+
+          nearest = getNearestOcrWord(
+            words,
+            region,
+            scale,
+            pointer,
+            { maxDistancePx: Infinity }
+          );
+
+          const t1 = (typeof performance !== "undefined" && performance.now)
+            ? performance.now()
+            : Date.now();
+          const dt = t1 - t0;
+          if (dt > 0.1) {
+            console.log(
+              "[NearestWord][perf] cost:",
+              dt.toFixed(3),
+              "ms",
+              "| words:",
+              words.length
+            );
+          }
+          setDebugInfo(dt.toFixed(3));
+        } else {
+          setDebugInfo(
+            "pointer:true " +
+            "words:" + (words ? "true" : "false") +
+            " len>0:" + (words && words.length > 0 ? "true" : "false") +
+            " region:" + (region ? "true" : "false") +
+            " scale:" + (scale ? "true" : "false")
           );
         }
-        setDebugInfo(
-   
-        dt.toFixed(3)
-        );
 
-        // 更新日志采样
+        // 每 10Hz 始终记录指尖样本，nearestWord 可能为 null
         const sample: PointerSampleInput = {
           timestamp: Date.now(),
           x: pointer.x,
           y: pointer.y,
-          inputMode: handDetectionMode,
+          inputMode: mode,
           nearestWord: nearest,
-          pressure: currentPressure,
-          level,
-          interestScore: currentInterestScore,
+          pressure,
+          level: lvl,
+          interestScore: interest,
           speed: undefined,
         };
         sessionLogger.addPointerSample(sample);
-
-        // 更新调试用最近词
         setDebugNearestWord(nearest);
       } else {
+        // 没有指尖就暂时不记录
         setDebugNearestWord({ text: "-1", bbox: { x: 0, y: 0, w: 0, h: 0 }, distance: Infinity });
-        setDebugInfo(
-          "pointer: " + (pointer ? "true" : "false") +
-        "ocrWordsInRegion: " + (ocrWordsInRegion ? "true" : "false") +
-        "ocrWordsInRegion.length: " + (ocrWordsInRegion?.length > 0 ? "true" : "false") +
-        "ocrRegion: " + (ocrRegion ? "true" : "false") +
-        "ocrScale: " + (ocrScale ? "true" : "false")
-        );
       }
 
       timer = window.setTimeout(tick, intervalMs);
@@ -302,17 +348,7 @@ export default function Home() {
         window.clearTimeout(timer);
       }
     };
-  }, [
-    isLoggingEnabled,
-    fingerTipPosition,
-    ocrWordsInRegion,
-    ocrRegion,
-    ocrScale,
-    handDetectionMode,
-    currentPressure,
-    level,
-    currentInterestScore,
-  ]);
+  }, [isLoggingEnabled]);
   
   // 长按检测相关状态（只保留UI需要的字段）
   const [longPressState, setLongPressState] = useState<{
@@ -347,6 +383,10 @@ export default function Home() {
 
   // 手指模式：长按自动调用 LLM 的开关
   const [isFingerLongPressLLMEnabled, setIsFingerLongPressLLMEnabled] = useState<boolean>(true);
+  // 同步 finger long-press LLM 开关到 ref，供 MediaPipe 回调使用
+  useEffect(() => {
+    isFingerLongPressLLMEnabledRef.current = isFingerLongPressLLMEnabled;
+  }, [isFingerLongPressLLMEnabled]);
 
   // 训练 topic 选择（用于 toast 展示）
   const [lastSelectedTopic, setLastSelectedTopic] = useState<string | null>(null);
@@ -1144,57 +1184,78 @@ export default function Home() {
               }
               
               // 长按检测逻辑（使用ref减少setState）
-              const currentTime = Date.now();
-              const newPosition = { x, y };
-              
-              // 检查是否在同一位置（容差范围内）
-              if (longPressRef.current.startPosition) {
-                const distance = Math.sqrt(
-                  Math.pow(newPosition.x - longPressRef.current.startPosition.x, 2) + 
-                  Math.pow(newPosition.y - longPressRef.current.startPosition.y, 2)
-                );
+              if (isFingerLongPressLLMEnabledRef.current) {
+                const currentTime = Date.now();
+                const newPosition = { x, y };
                 
-                if (distance <= longPressConfig.positionTolerance) {
-                  // 在同一位置，更新持续时间
-                  const duration = currentTime - longPressRef.current.startTime;
-                  let currentLevel: Level = 'light';
+                // 检查是否在同一位置（容差范围内）
+                if (longPressRef.current.startPosition) {
+                  const distance = Math.sqrt(
+                    Math.pow(newPosition.x - longPressRef.current.startPosition.x, 2) + 
+                    Math.pow(newPosition.y - longPressRef.current.startPosition.y, 2)
+                  );
                   
-                  if (duration >= longPressConfig.hardThreshold) {
-                    currentLevel = 'hard';
-                  } else if (duration >= longPressConfig.mediumThreshold) {
-                    currentLevel = 'medium';
-                  } else if (duration >= longPressConfig.lightThreshold) {
-                    currentLevel = 'light';
-                  }
-                  
-                  // 更新ref
-                  longPressRef.current.currentLevel = currentLevel;
-                  
-                  // 到达light级别时截屏（只截一次）
-                  if (duration >= longPressConfig.lightThreshold && !longPressRef.current.hasScreenshot) {
-                    takeFingerScreenshot(newPosition);
-                  }
-                  
-                  // 只在UI需要更新时setState（减少频率）
-                  const isActive = duration >= longPressConfig.autoTriggerDelay;
-                  if (longPressState.isActive !== isActive || 
-                      longPressState.currentLevel !== currentLevel ||
-                      Math.abs(longPressState.currentDuration - duration) > 100) { // 100ms更新一次UI
-                    setLongPressState(prev => ({
-                      ...prev,
-                      isActive,
-                      currentDuration: duration,
-                      currentLevel,
-                      shouldTriggerOnMove: false,
-                      startPosition: newPosition
-                    }));
+                  if (distance <= longPressConfig.positionTolerance) {
+                    // 在同一位置，更新持续时间
+                    const duration = currentTime - longPressRef.current.startTime;
+                    let currentLevel: Level = 'light';
+                    
+                    if (duration >= longPressConfig.hardThreshold) {
+                      currentLevel = 'hard';
+                    } else if (duration >= longPressConfig.mediumThreshold) {
+                      currentLevel = 'medium';
+                    } else if (duration >= longPressConfig.lightThreshold) {
+                      currentLevel = 'light';
+                    }
+                    
+                    // 更新ref
+                    longPressRef.current.currentLevel = currentLevel;
+                    
+                    // 到达light级别时截屏（只截一次）
+                    if (duration >= longPressConfig.lightThreshold && !longPressRef.current.hasScreenshot) {
+                      takeFingerScreenshot(newPosition);
+                    }
+                    
+                    // 只在UI需要更新时setState（减少频率）
+                    const isActive = duration >= longPressConfig.autoTriggerDelay;
+                    if (longPressState.isActive !== isActive || 
+                        longPressState.currentLevel !== currentLevel ||
+                        Math.abs(longPressState.currentDuration - duration) > 100) { // 100ms更新一次UI
+                      setLongPressState(prev => ({
+                        ...prev,
+                        isActive,
+                        currentDuration: duration,
+                        currentLevel,
+                        shouldTriggerOnMove: false,
+                        startPosition: newPosition
+                      }));
+                    }
+                  } else {
+                    // 位置变化太大，标记需要触发OCR
+                    const shouldTrigger = !longPressRef.current.hasTriggered && 
+                                         (currentTime - longPressRef.current.startTime) >= longPressConfig.autoTriggerDelay;
+                    
+                    // 重置ref
+                    longPressRef.current = {
+                      startTime: currentTime,
+                      startPosition: newPosition,
+                      currentLevel: 'light',
+                      hasTriggered: false,
+                      hasScreenshot: false
+                    };
+                    
+                    // 更新state
+                    const triggerLevel = shouldTrigger ? longPressRef.current.currentLevel : false;
+                    setLongPressState({
+                      isActive: false,
+                      currentDuration: 0,
+                      currentLevel: 'light',
+                      shouldTriggerOnMove: triggerLevel,
+                      startPosition: null
+                    });
                   }
                 } else {
-                  // 位置变化太大，标记需要触发OCR
-                  const shouldTrigger = !longPressRef.current.hasTriggered && 
-                                       (currentTime - longPressRef.current.startTime) >= longPressConfig.autoTriggerDelay;
-                  
-                  // 重置ref
+                  // 首次检测到手指位置
                   longPressRef.current = {
                     startTime: currentTime,
                     startPosition: newPosition,
@@ -1203,33 +1264,14 @@ export default function Home() {
                     hasScreenshot: false
                   };
                   
-                  // 更新state
-                  const triggerLevel = shouldTrigger ? longPressRef.current.currentLevel : false;
                   setLongPressState({
                     isActive: false,
                     currentDuration: 0,
                     currentLevel: 'light',
-                    shouldTriggerOnMove: triggerLevel,
+                    shouldTriggerOnMove: false,
                     startPosition: null
                   });
                 }
-              } else {
-                // 首次检测到手指位置
-                longPressRef.current = {
-                  startTime: currentTime,
-                  startPosition: newPosition,
-                  currentLevel: 'light',
-                  hasTriggered: false,
-                  hasScreenshot: false
-                };
-                
-                setLongPressState({
-                  isActive: false,
-                  currentDuration: 0,
-                  currentLevel: 'light',
-                  shouldTriggerOnMove: false,
-                  startPosition: null
-                });
               }
               
               // console.log('[HandDetection] 检测到指尖位置 (含宽高比修正):', { 
@@ -1577,297 +1619,6 @@ export default function Home() {
   };
 
 
-  // // Three.js渲染视频纹理截图函数（真正的3D变换，iPad兼容）
-  // const testWebGLScreenshot = async () => {
-  //   try {
-  //     console.log('[Three.js] 开始Three.js视频纹理截图...');
-      
-  //     const video = videoRef.current;
-  //     if (!video || video.readyState < 2) {
-  //       alert('❌ 视频未准备就绪，请等待视频加载完成');
-  //     return;
-  //   }
-    
-  //     console.log('[Three.js] 视频状态:', {
-  //       readyState: video.readyState,
-  //       videoWidth: video.videoWidth,
-  //       videoHeight: video.videoHeight,
-  //       currentTime: video.currentTime,
-  //       paused: video.paused
-  //     });
-      
-  //     // 检查视频是否有有效尺寸
-  //     if (video.videoWidth === 0 || video.videoHeight === 0) {
-  //       console.error('[Three.js] 视频尺寸无效:', video.videoWidth, 'x', video.videoHeight);
-  //       alert('❌ 视频尺寸无效，请确保视频已正确加载');
-  //     return;
-  //   }
-      
-  //     // 等待下一帧确保视频已渲染
-  //     await new Promise(resolve => {
-  //       if (video.paused) {
-  //         resolve(void 0);
-  //       } else {
-  //         // 等待视频播放事件
-  //         const waitForFrame = () => {
-  //           requestAnimationFrame(() => resolve(void 0));
-  //         };
-  //         if (video.readyState >= video.HAVE_CURRENT_DATA) {
-  //           waitForFrame();
-  //         } else {
-  //           video.addEventListener('canplay', waitForFrame, { once: true });
-  //         }
-  //       }
-  //     });
-      
-  //     console.log('[Three.js] 视频准备就绪，开始渲染');
-      
-  //     // 创建离屏渲染器
-  //     const containerWidth = 500;
-  //     const containerHeight = 500;
-  //     const renderWidth = containerWidth * 2; // 高分辨率
-  //     const renderHeight = containerHeight * 2;
-      
-  //     const renderer = new THREE.WebGLRenderer({ 
-  //       antialias: true, 
-  //       preserveDrawingBuffer: true,
-  //       alpha: false
-  //     });
-  //     renderer.setSize(renderWidth, renderHeight);
-  //     renderer.setClearColor(0x000000, 1); // 黑色背景
-      
-  //     // 设置色彩空间（重要！）
-  //     renderer.outputColorSpace = THREE.SRGBColorSpace;
-      
-  //     console.log('[Three.js] 渲染器创建成功，尺寸:', renderWidth, 'x', renderHeight);
-      
-  //     // 创建场景
-  //     const scene = new THREE.Scene();
-      
-  //     // 创建相机（Perspective，匹配CSS perspective(800px)）
-  //     const fov = 2 * Math.atan(containerHeight / (2 * 800)) * 180 / Math.PI; // FOV from perspective(800px)
-  //     const aspect = containerWidth / containerHeight;
-  //     const near = 0.1;
-  //     const far = 5000;
-  //     const camera = new THREE.PerspectiveCamera(fov, aspect, near, far);
-  //     camera.position.set(0, 0, 800);
-  //     camera.lookAt(0, 0, 0);
-      
-  //     console.log('[Three.js] 相机设置(Perspective):', { fov, aspect, near, far, position: camera.position });
-      
-  //     // 创建视频纹理
-  //     const videoTexture = new THREE.VideoTexture(video);
-  //     videoTexture.minFilter = THREE.LinearFilter;
-  //     videoTexture.magFilter = THREE.LinearFilter;
-  //     videoTexture.format = THREE.RGBAFormat;
-  //     videoTexture.colorSpace = THREE.SRGBColorSpace; // 设置正确的色彩空间
-  //     videoTexture.needsUpdate = true; // 强制更新纹理
-      
-  //     console.log('[Three.js] 视频纹理创建成功，属性:', {
-  //       image: videoTexture.image,
-  //       imageWidth: video.videoWidth,
-  //       imageHeight: video.videoHeight,
-  //       format: videoTexture.format,
-  //       colorSpace: videoTexture.colorSpace,
-  //       needsUpdate: videoTexture.needsUpdate
-  //     });
-      
-  //     // 先用canvas 2D测试视频是否有内容
-  //     const testCanvas = document.createElement('canvas');
-  //     testCanvas.width = 100;
-  //     testCanvas.height = 100;
-  //     const testCtx = testCanvas.getContext('2d');
-  //     if (testCtx) {
-  //       testCtx.drawImage(video, 0, 0, 100, 100);
-  //       const imageData = testCtx.getImageData(0, 0, 100, 100);
-  //       let hasContent = false;
-  //       for (let i = 0; i < imageData.data.length; i += 4) {
-  //         if (imageData.data[i] > 0 || imageData.data[i+1] > 0 || imageData.data[i+2] > 0) {
-  //           hasContent = true;
-  //           break;
-  //         }
-  //       }
-  //       console.log('[Three.js] 视频内容检测:', hasContent ? '有内容' : '全黑');
-  //       if (!hasContent) {
-  //         alert('⚠️ 视频内容为全黑，请检查摄像头');
-  //       }
-  //     }
-      
-  //     // 计算视频平面的尺寸（保持宽高比）
-  //     const videoAspect = video.videoWidth / video.videoHeight;
-  //     const containerAspect = containerWidth / containerHeight;
-      
-  //     let planeWidth, planeHeight;
-  //     if (videoAspect > containerAspect) {
-  //       planeWidth = containerWidth;
-  //       planeHeight = containerWidth / videoAspect;
-  //     } else {
-  //       planeHeight = containerHeight;
-  //       planeWidth = containerHeight * videoAspect;
-  //     }
-      
-  //     console.log('[Three.js] 平面尺寸:', { 
-  //       planeWidth, 
-  //       planeHeight,
-  //       videoAspect: videoAspect.toFixed(2),
-  //       containerAspect: containerAspect.toFixed(2)
-  //     });
-      
-  //     // 创建平面（使用pivot实现顶部为轴心）
-  //     const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
-  //     const material = new THREE.MeshBasicMaterial({ map: videoTexture, side: THREE.DoubleSide, transparent: false });
-  //     const mesh = new THREE.Mesh(geometry, material);
-  //     mesh.position.set(0, -planeHeight / 2, 0); // 把平面下移半个高度
-  //     const pivot = new THREE.Object3D();
-  //     pivot.position.set(0, planeHeight / 2, 0); // 顶部为旋转轴
-  //     pivot.add(mesh);
-  //     scene.add(pivot);
-      
-  //     console.log('[Three.js] 网格添加到场景');
-      
-  //     // 应用变换（与实时渲染完全一致）
-      
-  //     // 顺序匹配CSS: translate → scale → rotateX（以顶部为轴，保持pivot基准）
-  //     pivot.position.x = videoTranslate.x;
-  //     pivot.position.y = threePivotBaseYRef.current - videoTranslate.y;
-  //     mesh.scale.set(videoScale, videoScale, 1);
-  //     const rotationAngle = -(perspectiveStrength / 100) * (Math.PI / 9);
-  //     pivot.rotation.x = rotationAngle;
-      
-  //     console.log('[Three.js] 变换应用:', {
-  //       scale: { x: mesh.scale.x, y: mesh.scale.y },
-  //       position: { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
-  //       rotation: { x: mesh.rotation.x },
-  //       perspectiveStrength,
-  //       rotationAngle: rotationAngle * (180 / Math.PI) + '度',
-  //       cameraZ: camera.position.z
-  //     });
-      
-  //     // 如果有选择框，绘制到场景中
-  //     if (selectionBounds) {
-  //       // 创建选择框轮廓
-  //       const boxGeometry = new THREE.EdgesGeometry(
-  //         new THREE.PlaneGeometry(
-  //           selectionBounds.width,
-  //           selectionBounds.height
-  //         )
-  //       );
-  //       const boxMaterial = new THREE.LineBasicMaterial({ 
-  //         color: 0x00ff00, 
-  //         linewidth: 2 
-  //       });
-  //       const boxEdges = new THREE.LineSegments(boxGeometry, boxMaterial);
-        
-  //       // 计算选择框的世界坐标
-  //       const boxX = (selectionBounds.left + selectionBounds.width / 2) - containerWidth / 2;
-  //       const boxY = -(selectionBounds.top + selectionBounds.height / 2) + containerHeight / 2;
-        
-  //       boxEdges.position.set(boxX, boxY, 0.1); // 稍微前置避免z-fighting
-  //       scene.add(boxEdges);
-        
-  //       console.log('[Three.js] 添加选择框:', { boxX, boxY, ...selectionBounds });
-  //     }
-      
-  //     // 如果有长按进度环，绘制到场景中
-  //     if (longPressState.isActive && longPressState.startPosition) {
-  //       const { x, y } = longPressState.startPosition;
-  //       const progress = longPressState.currentDuration / longPressConfig.hardThreshold;
-        
-  //       // 创建进度环
-  //       const ringGeometry = new THREE.RingGeometry(18, 22, 32, 1, 0, Math.PI * 2 * progress);
-  //       const ringMaterial = new THREE.MeshBasicMaterial({ 
-  //         color: longPressState.currentLevel === 'hard' ? 0xff0000 :
-  //                longPressState.currentLevel === 'medium' ? 0xffa500 : 0x00ff00,
-  //         side: THREE.DoubleSide
-  //       });
-  //       const ring = new THREE.Mesh(ringGeometry, ringMaterial);
-        
-  //       // 计算进度环的世界坐标
-  //       const ringX = x - containerWidth / 2;
-  //       const ringY = -(y - containerHeight / 2);
-        
-  //       ring.position.set(ringX, ringY, 0.2); // 置于最前方
-  //       scene.add(ring);
-        
-  //       console.log('[Three.js] 添加长按进度环:', { ringX, ringY, progress, level: longPressState.currentLevel });
-  //     }
-      
-  //     // 确保纹理已更新
-  //     videoTexture.needsUpdate = true;
-      
-  //     console.log('[Three.js] 准备渲染，场景对象数:', scene.children.length);
-      
-  //     // 渲染场景
-  //     renderer.render(scene, camera);
-      
-  //     console.log('[Three.js] 渲染完成');
-      
-  //     // 检查渲染器的canvas内容
-  //     const gl = renderer.getContext();
-  //     const pixels = new Uint8Array(4);
-  //     gl.readPixels(renderWidth / 2, renderHeight / 2, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-  //     console.log('[Three.js] 中心像素值:', pixels);
-      
-  //     // 导出为图片
-  //     const dataURL = renderer.domElement.toDataURL('image/png');
-  //     setWebglScreenshot(dataURL);
-      
-  //     console.log('[Three.js] 截图完成，尺寸:', renderWidth, 'x', renderHeight);
-  //     console.log('[Three.js] 数据长度:', dataURL.length);
-  //     console.log('[Three.js] 数据预览:', dataURL.substring(0, 100) + '...');
-      
-  //     // 为了调试，也将渲染后的canvas临时添加到DOM
-  //     if (typeof document !== 'undefined') {
-  //       try {
-  //         const debugDiv = document.createElement('div');
-  //         debugDiv.style.position = 'fixed';
-  //         debugDiv.style.top = '10px';
-  //         debugDiv.style.right = '10px';
-  //         debugDiv.style.zIndex = '10000';
-  //         debugDiv.style.border = '2px solid red';
-  //         debugDiv.style.background = 'white';
-  //         debugDiv.style.padding = '5px';
-          
-  //         // 创建一个新的canvas并复制内容
-  //         const debugCanvas = document.createElement('canvas');
-  //         debugCanvas.width = renderWidth;
-  //         debugCanvas.height = renderHeight;
-  //         debugCanvas.style.width = '200px';
-  //         debugCanvas.style.height = '200px';
-          
-  //         const debugCtx = debugCanvas.getContext('2d');
-  //         if (debugCtx) {
-  //           debugCtx.drawImage(renderer.domElement, 0, 0);
-  //         }
-          
-  //         debugDiv.appendChild(debugCanvas);
-  //         document.body.appendChild(debugDiv);
-  //         console.log('[Three.js] 调试canvas已添加到DOM右上角（5秒后消失）');
-          
-  //         // 5秒后移除
-  //         setTimeout(() => {
-  //           if (document.body.contains(debugDiv)) {
-  //             document.body.removeChild(debugDiv);
-  //           }
-  //         }, 5000);
-  //       } catch (e) {
-  //         console.error('[Three.js] 无法创建调试canvas:', e);
-  //       }
-  //     }
-      
-  //     // 清理资源
-  //     geometry.dispose();
-  //     material.dispose();
-  //     videoTexture.dispose();
-  //     renderer.dispose();
-      
-  //     console.log('[Three.js] 资源清理完成');
-      
-  //   } catch (error) {
-  //     console.error('[Three.js] Three.js截图失败:', error);
-  //     alert(`Three.js截图失败: ${error instanceof Error ? error.message : String(error)}`);
-  //   }
-  // };
 
   // 5) 手指模式截屏函数（到达light级别时调用）
   const takeFingerScreenshot = async (fingerPos: {x: number, y: number}) => {
