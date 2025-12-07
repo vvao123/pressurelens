@@ -13,7 +13,7 @@ type Level = "light" | "medium" | "hard";
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
-  const threeCanvasRef = useRef<HTMLCanvasElement>(null); // Three.js渲染canvas
+  const threeCanvasRef = useRef<HTMLCanvasElement>(null); // Three.js render canvas
   const threeRendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const threeSceneRef = useRef<THREE.Scene | null>(null);
   const threeCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -21,23 +21,23 @@ export default function Home() {
   const threeMeshRef = useRef<THREE.Mesh | null>(null);
   const threeTextureRef = useRef<THREE.VideoTexture | null>(null);
   const animationFrameRef = useRef<number | null>(null);
-  const threePivotBaseYRef = useRef<number>(0); // 记录顶部轴心的基准Y
+  const threePivotBaseYRef = useRef<number>(0); // record the base Y of the top pivot
   const shaderUniformsRef = useRef<{ u_map: { value: THREE.Texture | null }; u_comp: { value: number } } | null>(null);
-  const [warpCompensation, setWarpCompensation] = useState<number>(0.5); // 0~0.5 建议范围，0为关闭
-  // 用 ref 保存最新的 warpCompensation，避免 MediaPipe 回调里闭包拿到旧值
+  const [warpCompensation, setWarpCompensation] = useState<number>(0.5); // 0~0.5 recommended range, 0 is off
+  // use ref to save the latest warpCompensation, avoid the old value being taken by the closure in the MediaPipe callback
   const warpCompensationRef = useRef<number>(warpCompensation);
   const offscreenRendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const captureLockRef = useRef<boolean>(false);
   const ocrOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   
-  // 长按检测的ref，避免频繁setState
+  // ref for long press detection, avoid frequent setState
   const longPressRef = useRef({
     startTime: 0,
     startPosition: null as {x: number, y: number} | null,
     currentLevel: 'light' as Level,
     hasTriggered: false,
-    hasScreenshot: false // 是否已经截屏
+    hasScreenshot: false // whether the screenshot has been taken
   });
 
   const [level, setLevel] = useState<Level>("light");
@@ -51,22 +51,22 @@ export default function Home() {
   const [currentPressure, setCurrentPressure] = useState<number>(0);
   const [isUsingPen, setIsUsingPen] = useState<boolean>(false);
   const [currentMaxLevel, setCurrentMaxLevel] = useState<Level>("light"); // current max level
-  const [isPressed, setIsPressed] = useState<boolean>(false); // 是否正在按压
-  const [isVideoFrozen, setIsVideoFrozen] = useState<boolean>(false); // 视频是否被冻结
-  const [drawingPath, setDrawingPath] = useState<{x: number, y: number}[]>([]); // 绘制路径
-  const [selectionBounds, setSelectionBounds] = useState<{left: number, top: number, width: number, height: number} | null>(null); // 选择区域边界
-  const [isStreaming, setIsStreaming] = useState<boolean>(false); // 是否启用流式显示
-  const [isProcessing, setIsProcessing] = useState<boolean>(false); // 防止重复处理
-  const [isEnhancementEnabled, setIsEnhancementEnabled] = useState<boolean>(false); // 是否启用图像增强
-  const [videoScale, setVideoScale] = useState<number>(1.49); // 视频缩放比例
-  const [videoTranslate, setVideoTranslate] = useState<{x: number, y: number}>({x: 0, y: 0}); // 视频平移位置
-  const [floatingResponse, setFloatingResponse] = useState<{text: string, position: {x: number, y: number}} | null>(null); // 浮窗响应
-  const [isDraggingFloat, setIsDraggingFloat] = useState<boolean>(false); // 是否正在拖拽浮窗
-  const [perspectiveStrength, setPerspectiveStrength] = useState<number>(67); // 透视强度 0-100
+  const [isPressed, setIsPressed] = useState<boolean>(false); // whether the pressure is being applied
+  const [isVideoFrozen, setIsVideoFrozen] = useState<boolean>(false); // whether the video is frozen
+  const [drawingPath, setDrawingPath] = useState<{x: number, y: number}[]>([]); // drawing path
+  const [selectionBounds, setSelectionBounds] = useState<{left: number, top: number, width: number, height: number} | null>(null); // selection area boundary
+  const [isStreaming, setIsStreaming] = useState<boolean>(false); // whether the streaming display is enabled
+  const [isProcessing, setIsProcessing] = useState<boolean>(false); // prevent repeated processing
+  const [isEnhancementEnabled, setIsEnhancementEnabled] = useState<boolean>(false); // whether the image enhancement is enabled
+  const [videoScale, setVideoScale] = useState<number>(1.49); // video scale ratio
+  const [videoTranslate, setVideoTranslate] = useState<{x: number, y: number}>({x: 0, y: 0}); // video translation position
+  const [floatingResponse, setFloatingResponse] = useState<{text: string, position: {x: number, y: number}} | null>(null); // floating window response
+  const [isDraggingFloat, setIsDraggingFloat] = useState<boolean>(false); // whether the floating window is being dragged
+  const [perspectiveStrength, setPerspectiveStrength] = useState<number>(67); // perspective strength 0-100
 
-  const [webglScreenshot, setWebglScreenshot] = useState<string>(""); // WebGL截图结果
+  const [webglScreenshot, setWebglScreenshot] = useState<string>(""); // WebGL screenshot result
 
-  // OCR 选区结果（主页）
+  // OCR region result (main page)
   const [ocrWordsInRegion, setOcrWordsInRegion] = useState<WordBBox[] | null>(null);
   const [ocrRegion, setOcrRegion] = useState<{left: number; top: number; width: number; height: number} | null>(null);
   const [ocrScale, setOcrScale] = useState<number>(2);
@@ -78,13 +78,13 @@ export default function Home() {
   const [regionTopicsLoading, setRegionTopicsLoading] = useState(false);
   const [regionTopicsError, setRegionTopicsError] = useState<string | null>(null);
 
-  // 数据采集开关
+  // data collection switch
   const [isLoggingEnabled, setIsLoggingEnabled] = useState<boolean>(false);
   const [lastVoiceAnnotation, setLastVoiceAnnotation] = useState<VoiceAnnotation | null>(null);
 
-  // 主页：OCR 选区处理
+  // main page: OCR region processing
   const runRegionOCR = async () => {
-    // 对当前可视容器整体做 OCR（不依赖蓝色选区）
+    // do OCR on the entire visible container (not dependent on the blue region)
     const container = document.querySelector('.video-container') as HTMLElement | null;
     if (!container) return;
     const region = {
@@ -112,7 +112,7 @@ export default function Home() {
       setRegionRecognizedText(fullText);
     } catch {}
 
-    // 将整页 OCR 文本写入 sessionLogger，并调用 LLM 提取 topics
+    // write the entire page OCR text to sessionLogger, and call LLM to extract topics
     if (!fullText) {
       setRegionTopics([]);
       sessionLogger.setPageOcr({ pageText: "", pageTopics: [] });
@@ -160,7 +160,7 @@ export default function Home() {
     setRegionTopicsError(null);
   };
 
-  // 绘制 OCR 叠加词框到 ocrOverlayCanvas
+  // draw OCR overlay word boxes to ocrOverlayCanvas
   useEffect(() => {
     const c = ocrOverlayCanvasRef.current;
     const container = document.querySelector(".video-container") as HTMLElement | null;
@@ -191,39 +191,39 @@ export default function Home() {
     }
   }, [ocrWordsInRegion, ocrRegion, ocrScale, videoScale, videoTranslate]);
 
-  // 手指检测相关状态
-  const [handResults, setHandResults] = useState<any>(null); // MediaPipe 检测结果
-  const [fingerTipPosition, setFingerTipPosition] = useState<{x: number, y: number} | null>(null); // 指尖位置
-  const [isHandDetectionEnabled, setIsHandDetectionEnabled] = useState<boolean>(false); // 是否启用手指检测
-  const [handDetectionMode, setHandDetectionMode] = useState<'pencil' | 'finger'>('pencil'); // 输入模式
-  const [handsInstance, setHandsInstance] = useState<any>(null); // MediaPipe Hands 实例
+  // finger detection related state
+  const [handResults, setHandResults] = useState<any>(null); // MediaPipe detection result
+  const [fingerTipPosition, setFingerTipPosition] = useState<{x: number, y: number} | null>(null); // finger tip position
+  const [isHandDetectionEnabled, setIsHandDetectionEnabled] = useState<boolean>(false); // whether the finger detection is enabled
+  const [handDetectionMode, setHandDetectionMode] = useState<'pencil' | 'finger'>('pencil'); // input mode
+  const [handsInstance, setHandsInstance] = useState<any>(null); // MediaPipe Hands instance
   
-  // 用户兴趣度检测相关状态
-  const [isInterestDetectionEnabled, setIsInterestDetectionEnabled] = useState<boolean>(false); // 是否启用兴趣度检测
-  const [movementTrail, setMovementTrail] = useState<Array<{x: number, y: number, timestamp: number, speed: number}>>([]); // 移动轨迹
+  // user interest detection related state
+  const [isInterestDetectionEnabled, setIsInterestDetectionEnabled] = useState<boolean>(false); // whether the interest detection is enabled
+  const [movementTrail, setMovementTrail] = useState<Array<{x: number, y: number, timestamp: number, speed: number}>>([]); // movement trail
 
-  // 同步 warpCompensation 到 ref，供 MediaPipe 回调和 Three 投影使用
+  // synchronize warpCompensation to ref, for MediaPipe callback and Three projection use
   useEffect(() => {
     warpCompensationRef.current = warpCompensation;
   }, [warpCompensation]);
-  const [interestHeatmap, setInterestHeatmap] = useState<Map<string, number>>(new Map()); // 兴趣热点图
-  const [currentInterestScore, setCurrentInterestScore] = useState<number>(0); // 当前兴趣度分数
-  const [detectedKeywords, setDetectedKeywords] = useState<string[]>([]); // 检测到的关键词
+  const [interestHeatmap, setInterestHeatmap] = useState<Map<string, number>>(new Map()); // interest heatmap
+  const [currentInterestScore, setCurrentInterestScore] = useState<number>(0); // current interest score
+  const [detectedKeywords, setDetectedKeywords] = useState<string[]>([]); // detected keywords
   const [interestAnalysis, setInterestAnalysis] = useState<{
     totalInterestScore: number;
     averageSpeed: number;
     focusAreas: Array<{x: number, y: number, radius: number, score: number}>;
     topKeywords: Array<{keyword: string, score: number}>;
-  } | null>(null); // 兴趣分析结果
+  } | null>(null); // interest analysis result
 
-  // 调试用：当前指尖最近的 OCR 词
+  // debug: current nearest OCR word for the finger tip
   const [debugNearestWord, setDebugNearestWord] = useState<NearestWordInfo | null>(null);
   
-  // 指读数据采样（约 10Hz）：记录指尖位置 + 最近 OCR 词框
+  // finger reading data sampling (about 10Hz): record finger tip position + nearest OCR word box
   useEffect(() => {
     if (!isLoggingEnabled) return;
 
-    const intervalMs = 100; // 10Hz
+    const intervalMs = 100; // 10Hz sampling rate
     let timer: number | undefined;
 
     const tick = () => {
@@ -251,7 +251,7 @@ export default function Home() {
           ? performance.now()
           : Date.now();
         const dt = t1 - t0;
-        // 在 Next 开发模式下，这个 log 会同时出现在浏览器控制台和 dev server 终端里
+        // in Next development mode, this log will appear in both browser console and dev server terminal
         if (dt > 0.1) {
           console.log(
             "[NearestWord][perf] cost:",
@@ -266,7 +266,7 @@ export default function Home() {
         dt.toFixed(3)
         );
 
-        // 更新日志采样
+        // update log sampling
         const sample: PointerSampleInput = {
           timestamp: Date.now(),
           x: pointer.x,
@@ -280,7 +280,7 @@ export default function Home() {
         };
         sessionLogger.addPointerSample(sample);
 
-        // 更新调试用最近词
+        // update debug nearest word
         setDebugNearestWord(nearest);
       } else {
         setDebugNearestWord({ text: "-1", bbox: { x: 0, y: 0, w: 0, h: 0 }, distance: Infinity });
@@ -314,12 +314,12 @@ export default function Home() {
     currentInterestScore,
   ]);
   
-  // 长按检测相关状态（只保留UI需要的字段）
+  // long press detection related state (only keep the fields needed for UI)
   const [longPressState, setLongPressState] = useState<{
     isActive: boolean;
     currentDuration: number;
     currentLevel: Level;
-    shouldTriggerOnMove: Level | false; // 标记应该触发的级别，false表示不触发
+    shouldTriggerOnMove: Level | false; // mark the level that should be triggered, false means not to trigger
     startPosition: {x: number, y: number} | null;
   }>({
     isActive: false,
@@ -329,42 +329,42 @@ export default function Home() {
     startPosition: null
   });
   
-  // 手指检测配置参数
+  // finger detection configuration parameters
   const [handDetectionConfig, setHandDetectionConfig] = useState({
     minDetectionConfidence: 0.8,
     minTrackingConfidence: 0.8,
     modelComplexity: 1
   });
 
-  // 长按配置参数
+  // long press configuration parameters
   const longPressConfig = {
-    positionTolerance: 15, // 位置容差（像素）
-    lightThreshold: 1800,   // light级别阈值（毫秒）
-    mediumThreshold: 3000, // medium级别阈值（毫秒）
-    hardThreshold: 5500,   // hard级别阈值（毫秒）
-    autoTriggerDelay: 1800  // 自动触发延迟（毫秒）
+    positionTolerance: 15, // position tolerance (pixels)
+    lightThreshold: 1800,   // light level threshold (milliseconds)
+    mediumThreshold: 3000, // medium level threshold (milliseconds)
+    hardThreshold: 5500,   // hard level threshold (milliseconds)
+    autoTriggerDelay: 1800  // auto trigger delay (milliseconds)
   };
 
-  // 手指模式：长按自动调用 LLM 的开关
+  // finger mode: long press automatically call LLM switch
   const [isFingerLongPressLLMEnabled, setIsFingerLongPressLLMEnabled] = useState<boolean>(true);
 
-  // 训练 topic 选择（用于 toast 展示）
+  // training topic selection (for toast display)
   const [lastSelectedTopic, setLastSelectedTopic] = useState<string | null>(null);
 
-  // 兴趣度检测配置参数
+  // interest detection configuration parameters
   const interestDetectionConfig = {
-    trailMaxLength: 1000, // 轨迹最大长度
+    trailMaxLength: 1000, // trail maximum length
     speedThreshold: {
-      slow: 0.5,    // 慢速阈值（像素/毫秒）
-      fast: 3.0     // 快速阈值（像素/毫秒）
+      slow: 0.5,    // slow threshold (pixels/milliseconds)
+      fast: 3.0     // fast threshold (pixels/milliseconds)
     },
-    stayTimeThreshold: 500, // 停留时间阈值（毫秒）
-    heatmapGridSize: 20,    // 热点图网格大小（像素）
-    interestDecayRate: 0.95, // 兴趣度衰减率
-    minInterestScore: 0.1   // 最小兴趣度分数
+    stayTimeThreshold: 500, // stay time threshold (milliseconds)
+    heatmapGridSize: 20,    // heatmap grid size (pixels)
+    interestDecayRate: 0.95, // interest decay rate
+    minInterestScore: 0.1   // minimum interest score
   };
 
-  // 兴趣度检测核心算法函数
+  // interest detection core algorithm function
   const calculateSpeed = (point1: {x: number, y: number, timestamp: number}, point2: {x: number, y: number, timestamp: number}): number => {
     const distance = Math.hypot(point2.x - point1.x, point2.y - point1.y);
     const timeDiff = point2.timestamp - point1.timestamp;
@@ -378,7 +378,7 @@ export default function Home() {
     setMovementTrail(prevTrail => {
       let updatedTrail = [...prevTrail];
       
-      // 计算速度
+      // calculate speed
       if (updatedTrail.length > 0) {
         const lastPoint = updatedTrail[updatedTrail.length - 1];
         newPoint.speed = calculateSpeed(lastPoint, newPoint);
@@ -386,7 +386,7 @@ export default function Home() {
       
       updatedTrail.push(newPoint);
       
-      // 限制轨迹长度
+      // limit the trail length
       if (updatedTrail.length > interestDetectionConfig.trailMaxLength) {
         updatedTrail = updatedTrail.slice(-interestDetectionConfig.trailMaxLength);
       }
@@ -395,7 +395,7 @@ export default function Home() {
     });
   };
 
-  // rAF 采样：启用兴趣检测且存在指尖坐标时，以 ~60fps 更新轨迹
+  // rAF sampling: update the trail when the interest detection is enabled and the finger tip position exists, at ~60fps
   useEffect(() => {
     if (!isInterestDetectionEnabled) return;
     let rafId: number | null = null;
@@ -418,26 +418,26 @@ export default function Home() {
     let slowMovementCount = 0;
     let stayTimeCount = 0;
     
-    // 分析最近10个点的行为模式
+    // analyze the behavior pattern of the last 10 points
     const recentPoints = trail.slice(-10);
     
     for (let i = 1; i < recentPoints.length; i++) {
       const point = recentPoints[i];
       const prevPoint = recentPoints[i - 1];
       
-      // 速度分析
+      // speed analysis
       if (point.speed < interestDetectionConfig.speedThreshold.slow) {
         slowMovementCount++;
       }
       
-      // 停留时间分析
+        // stay time analysis
       const timeDiff = point.timestamp - prevPoint.timestamp;
       if (timeDiff > interestDetectionConfig.stayTimeThreshold) {
         stayTimeCount++;
       }
     }
     
-    // 计算兴趣度分数
+    // calculate interest score
     const speedScore = slowMovementCount / recentPoints.length; // 0-1
     const stayScore = stayTimeCount / recentPoints.length; // 0-1
     const densityScore = Math.min(trail.length / 50, 1); // 轨迹密度分数
@@ -468,65 +468,8 @@ export default function Home() {
     });
   };
 
-  const extractKeywordsFromArea = async (x: number, y: number, radius: number = 50): Promise<string[]> => {
-    try {
-      // 结合OCR结果提取关键词
-      if (answer && answer.length > 0) {
-        // 简单的关键词提取逻辑
-        const words = answer.split(/[\s\n,，。！？；：]/).filter(word => 
-          word.length > 1 && 
-          !['的', '了', '在', '是', '有', '和', '与', '或', '但', '而', '这', '那', '个', '一', '二', '三', '四', '五'].includes(word)
-        );
-        
-        // 返回前5个最长的词作为关键词
-        return words
-          .sort((a, b) => b.length - a.length)
-          .slice(0, 5)
-          .map(word => word.trim());
-      }
-      
-      // 如果没有OCR结果，返回模拟关键词
-      const keywords = ['技术', '创新', '人工智能', '用户体验', '设计', '算法', '数据', '分析', '系统', '应用'];
-      return keywords.slice(0, Math.floor(Math.random() * 3) + 1);
-    } catch (error) {
-      console.error('关键词提取失败:', error);
-      return [];
-    }
-  };
 
-  const analyzeInterestPatterns = async () => {
-    if (movementTrail.length < 5) return;
-    
-    const totalScore = calculateInterestScore(movementTrail);
-    const averageSpeed = movementTrail.reduce((sum, point) => sum + point.speed, 0) / movementTrail.length;
-    
-    // 识别焦点区域
-    const focusAreas: Array<{x: number, y: number, radius: number, score: number}> = [];
-    const heatmapEntries = Array.from(interestHeatmap.entries());
-    
-    for (const [key, score] of heatmapEntries) {
-      if (score > 20) { // 只显示高分区域
-        const [gridX, gridY] = key.split(',').map(Number);
-        const x = gridX * interestDetectionConfig.heatmapGridSize;
-        const y = gridY * interestDetectionConfig.heatmapGridSize;
-        focusAreas.push({ x, y, radius: 30, score });
-      }
-    }
-    
-    // 提取关键词
-    const keywords = await extractKeywordsFromArea(0, 0, 100);
-    const topKeywords = keywords.map(keyword => ({
-      keyword,
-      score: Math.random() * 50 + 20 // 模拟分数
-    }));
-    
-    setInterestAnalysis({
-      totalInterestScore: totalScore,
-      averageSpeed,
-      focusAreas,
-      topKeywords
-    });
-  };
+
 
   // 稳定的实时速度（最近8点的总位移/总时间，px/s）
   const stableRealtimeSpeedPxPerSec = useMemo(() => {
@@ -580,7 +523,7 @@ export default function Home() {
             width: { ideal: 19200, min: 1280 },
             height: { ideal: 10800, min: 720 },
             frameRate: { ideal: 30, min: 15 },
-            // 添加更多约束以获得更好的画质
+            // add more constraints to get better quality
              aspectRatio: { ideal: 1 }
           }, 
           audio: false,
@@ -593,13 +536,13 @@ export default function Home() {
           try {
             await v.play();
             
-            // 尝试设置自动对焦
+            // try to set automatic focus
             try {
               const videoTrack = stream.getVideoTracks()[0];
               const capabilities = videoTrack.getCapabilities() as any;
               console.log('[Camera] 摄像头能力:', capabilities);
               
-              // 如果支持对焦，设置为连续自动对焦
+              // if support focus, set to continuous automatic focus
               if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
                 await videoTrack.applyConstraints({
                   advanced: [{ focusMode: 'continuous' } as any]
@@ -613,9 +556,9 @@ export default function Home() {
               } else {
                 console.log('[Camera] ⚠️ 设备不支持自动对焦控制，尝试手动对焦...');
                 
-                // 如果支持手动对焦距离设置
+                // if support manual focus distance setting
                 if (capabilities.focusDistance) {
-                  // 设置一个中等对焦距离（通常对文档阅读比较好）
+                  // set a medium focus distance (usually better for document reading)
                   const midDistance = (capabilities.focusDistance.min + capabilities.focusDistance.max) / 2;
                   await videoTrack.applyConstraints({
                     advanced: [{ focusDistance: midDistance } as any]
@@ -626,7 +569,7 @@ export default function Home() {
                 }
               }
               
-              // 如果支持白平衡，设置为自动
+              // if support white balance, set to automatic
               if (capabilities.whiteBalanceMode && capabilities.whiteBalanceMode.includes('continuous')) {
                 await videoTrack.applyConstraints({
                   advanced: [{ whiteBalanceMode: 'continuous' } as any]
@@ -1360,16 +1303,7 @@ export default function Home() {
     }
   }, [isFingerLongPressLLMEnabled, longPressState.isActive, longPressState.currentDuration, longPressState.currentLevel, fingerTipPosition, isProcessing]);
 
-  // 定期分析兴趣模式
-  useEffect(() => {
-    if (!isInterestDetectionEnabled || movementTrail.length < 10) return;
-    
-    const analysisInterval = setInterval(() => {
-      analyzeInterestPatterns();
-    }, 2000); // 每2秒分析一次
-    
-    return () => clearInterval(analysisInterval);
-  }, [isInterestDetectionEnabled, movementTrail.length]);
+  
 
   // 监听手指移开/消失触发
   useEffect(() => {
@@ -1985,21 +1919,27 @@ export default function Home() {
         return;
       }
       
-      // 调用LLM
+      // 调用LLM（手指模式：告诉 LLM 手指位置在截图下部中间）
       const resp = await fetch("/api/llm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: picked || "No text", level, image: imageDataUrl, streaming: isStreaming }),
+        body: JSON.stringify({
+          text: picked || "No text",
+          level,
+          image: imageDataUrl,
+          streaming: isStreaming,
+          focusHint: "The user is pointing at the text located near the bottom center of the screenshot.Focus your explanation on the phrase or words closest to that region.",
+        }),
       });
       
       if (!resp.ok) {
-        throw new Error(`LLM API 错误: ${resp.status}`);
+        throw new Error(`LLM API error: ${resp.status}`);
       }
       
       if (isStreaming) {
         // 流式响应处理
         const reader = resp.body?.getReader();
-        if (!reader) throw new Error('无法获取流式响应');
+        if (!reader) throw new Error('Failed to get streaming response');
         
         setAnswer("");
         
@@ -2056,7 +1996,7 @@ export default function Home() {
                     }
                   }
                 } catch (e) {
-                  console.log('[Finger Streaming] 跳过无效行:', line);
+                  console.log('[Finger Streaming] Skip invalid line:', line);
                 }
               }
             }
@@ -2069,7 +2009,7 @@ export default function Home() {
         const data = await resp.json();
         const content = data.content || "No response";
         
-        console.log('[Finger] LLM响应完成:', { contentLength: content.length });
+        console.log('[Finger] LLM response completed:', { contentLength: content.length });
         setAnswer(`👆 finger mode: result:\n\n${content}`);
         
         // 设置浮窗
@@ -2094,7 +2034,7 @@ export default function Home() {
       }
       
     } catch (err: any) {
-      console.error('[Finger] 处理失败:', err);
+      console.error('[Finger] Processing failed:', err);
       setAnswer(`👆 finger mode: error: ${err?.message || String(err)}`);
     } finally {
       setIsProcessing(false);
@@ -2117,7 +2057,7 @@ export default function Home() {
     
     // 防止重复处理
     if (isProcessing) {
-      console.log('[OCR] 已在处理中，跳过');
+      console.log('[OCR] Already processing, skip');
       return;
     }
     setIsProcessing(true);
@@ -2184,32 +2124,32 @@ export default function Home() {
     
     if (!videoReady) { 
       setAnswer("Video is not ready, please wait..."); 
-      console.log('[Click] 视频未就绪');
+      console.log('[Click] Video is not ready, please wait...');
       return; 
     }
     if (!ocrReady || !worker) { 
       setAnswer("OCR engine is still loading, please wait..."); 
-      console.log('[Click] OCR 未就绪');
+      console.log('[Click] OCR is not ready, please wait...');
       return; 
     }
 
     if (!videoReady || !ocrReady || !worker) {
-      console.log('[OCR] 未准备就绪:', { videoReady, ocrReady, hasWorker: !!worker });
+      console.log('[OCR] Not ready:', { videoReady, ocrReady, hasWorker: !!worker });
       return;
     } 
 
     const v = videoRef.current;
     const overlay = overlayRef.current;
     if (!v || !overlay) {
-      console.log('[OCR] 元素引用缺失');
+      console.log('[OCR] Element reference missing');
       return;
     }
     
     // 直接从overlay截图，避免复杂的坐标转换
-    console.log('[OCR] 使用overlay直接截图方法');
+    console.log('[OCR] Using overlay direct screenshot method');
     
     if (!calculatedBounds || calculatedBounds.width <= 5 || calculatedBounds.height <= 5) {
-      setAnswer("please use Apple Pencil to draw the area to be recognized");
+      setAnswer("Please use Apple Pencil to draw the area to be recognized");
       setIsProcessing(false);
       return;
     }
@@ -2258,10 +2198,10 @@ export default function Home() {
       
       // 将处理后的数据写回canvas
       ctx.putImageData(imageData, 0, 0);
-      console.log('[Enhancement] ✅ 图像增强完成（对比度+二值化）');
+      console.log('[Enhancement] ✅ Image enhancement completed (contrast + binarization)');
     };
     
-    console.log('[Click] 开始从overlay直接截图...', {
+    console.log('[Click] Start direct screenshot from overlay...', {
       canvasSize: { width: canvas.width, height: canvas.height },
       selectionBounds: calculatedBounds
     });
@@ -2270,7 +2210,7 @@ export default function Home() {
       // 方法：使用getDisplayMedia API或直接从DOM截图
       // 但最简单的方法是创建一个临时的canvas来绘制整个overlay，然后裁剪
       
-      console.log('[Screenshot] 开始截取overlay区域...');
+      console.log('[Screenshot] Start capturing overlay area...');
       
       // 获取各种尺寸信息用于调试
       const overlayRect = overlay.getBoundingClientRect();
@@ -2278,14 +2218,7 @@ export default function Home() {
       const videoNaturalSize = { width: v.videoWidth, height: v.videoHeight };
       const containerSize = { width: 500, height: 500 }; // 你设置的容器尺寸
       
-      console.log('[Debug] 尺寸对比:', {
-        蓝框区域: calculatedBounds,
-        overlay尺寸: { width: overlayRect.width, height: overlayRect.height },
-        video显示尺寸: { width: videoRect.width, height: videoRect.height },
-        video原始尺寸: videoNaturalSize,
-        容器尺寸: containerSize,
-        当前变换: { scale: videoScale, translate: videoTranslate }
-      });
+     
       
       // 创建一个临时canvas来绘制整个overlay内容
       const tempCanvas = document.createElement("canvas");
@@ -2293,30 +2226,28 @@ export default function Home() {
       tempCanvas.height = overlayRect.height;
       const tempCtx = tempCanvas.getContext("2d")!;
       
-      console.log('[Debug] 临时Canvas尺寸:', { width: tempCanvas.width, height: tempCanvas.height });
+      console.log('[Debug] Temporary canvas size:', { width: tempCanvas.width, height: tempCanvas.height });
       
       // 绘制video到临时canvas（包含所有变换）
       tempCtx.save();
       
-      console.log('[Debug] 开始应用变换...');
+      console.log('[Debug] Start applying transformations...');
       
       // 应用与video相同的变换
       tempCtx.translate(tempCanvas.width / 2, tempCanvas.height / 2);
-      console.log('[Debug] 1. 移动到中心:', tempCanvas.width / 2, tempCanvas.height / 2);
+      console.log('[Debug] 1. Move to center:', tempCanvas.width / 2, tempCanvas.height / 2);
       
       tempCtx.scale(-1, 1); // 水平翻转
-      console.log('[Debug] 2. 水平翻转');
+      console.log('[Debug] 2. Horizontal flip');
       
       tempCtx.scale(videoScale, videoScale); // 缩放
-      console.log('[Debug] 3. 缩放:', videoScale);
+      console.log('[Debug] 3. Scale:', videoScale);
       
       tempCtx.translate(videoTranslate.x, videoTranslate.y); // 平移
-      console.log('[Debug] 4. 平移:', videoTranslate.x, videoTranslate.y);
+      console.log('[Debug] 4. Translate:', videoTranslate.x, videoTranslate.y);
       
       tempCtx.translate(-tempCanvas.width / 2, -tempCanvas.height / 2);
-      console.log('[Debug] 5. 移回原点');
-      console.log('[Debug] 注意：截图不包含透视变换（Canvas 2D限制），透视强度:', perspectiveStrength);
-      console.log('[Debug] 坐标系统已修复：透视和其他变换分离处理');
+     
       
       // 绘制video，保持原始宽高比
       // 问题可能在这里：我们应该绘制video的原始尺寸，而不是强制拉伸到canvas尺寸
@@ -2339,21 +2270,12 @@ export default function Home() {
         drawY = 0;
       }
       
-      console.log('[Debug] 绘制参数:', {
-        videoAspect,
-        canvasAspect,
-        drawArea: { x: drawX, y: drawY, width: drawWidth, height: drawHeight }
-      });
+     
       
       tempCtx.drawImage(v, drawX, drawY, drawWidth, drawHeight);
       tempCtx.restore();
       
-      // 从临时canvas中提取选择区域
-      console.log('[Debug] 准备提取区域:', {
-        提取坐标: calculatedBounds,
-        临时Canvas尺寸: { width: tempCanvas.width, height: tempCanvas.height },
-        最终Canvas尺寸: { width: canvas.width, height: canvas.height }
-      });
+      
       
       // 检查提取区域是否超出边界
       const safeLeft = Math.max(0, Math.min(calculatedBounds.left, tempCanvas.width - 1));
@@ -2361,10 +2283,7 @@ export default function Home() {
       const safeWidth = Math.min(calculatedBounds.width, tempCanvas.width - safeLeft);
       const safeHeight = Math.min(calculatedBounds.height, tempCanvas.height - safeTop);
       
-      console.log('[Debug] 安全边界检查:', {
-        原始: calculatedBounds,
-        安全: { left: safeLeft, top: safeTop, width: safeWidth, height: safeHeight }
-      });
+    
       
       const selectionImageData = tempCtx.getImageData(
         safeLeft, 
@@ -2373,17 +2292,12 @@ export default function Home() {
         safeHeight
       );
       
-      console.log('[Debug] 提取的ImageData:', {
-        width: selectionImageData.width,
-        height: selectionImageData.height,
-        dataLength: selectionImageData.data.length
-      });
+      
       
       // 将提取的区域绘制到最终canvas
       ctx.putImageData(selectionImageData, 0, 0);
       
-      console.log('[Screenshot] 从overlay截图完成');
-      
+        
       // 额外调试：保存临时canvas用于检查
       const tempDataURL = tempCanvas.toDataURL();
       console.log('[Debug] 临时Canvas内容长度:', tempDataURL.length);
@@ -2393,13 +2307,10 @@ export default function Home() {
       // 检查canvas是否真的有内容
       const imageData = ctx.getImageData(0, 0, Math.min(10, canvas.width), Math.min(10, canvas.height));
       const hasContent = imageData.data.some(pixel => pixel !== 0);
-      console.log('[Click] Canvas内容检查:', { 
-        hasContent,
-        samplePixels: Array.from(imageData.data.slice(0, 12))
-      });
+     
       
       if (!hasContent) {
-        console.error('[Click] Canvas内容为空！尝试iPad备用捕获方法...');
+        console.error('[Click] Canvas is empty! Try iPad fallback capture method...');
         
         // iPad备用方法：尝试不同的绘制参数
         try {
@@ -2436,10 +2347,10 @@ export default function Home() {
           );
           ctx.putImageData(roiImageData, 0, 0);
           
-          console.log('[Click] iPad备用捕获成功');
+          console.log('[Click] iPad fallback capture successful');
           
         } catch (fallbackError: any) {
-          console.error('[Click] iPad备用捕获也失败:', fallbackError);
+          console.error('[Click] iPad fallback capture also failed:', fallbackError);
           setAnswer(`Error: All video capture methods failed - ${fallbackError.message || String(fallbackError)}`);
           setCapturedImage("");
           return;
@@ -2447,13 +2358,13 @@ export default function Home() {
       }
       
     } catch (drawError: any) {
-      console.error('[Click] 绘制视频帧到canvas时出错:', drawError);
+      console.error('[Click] Error drawing video frame to canvas:', drawError);
       setAnswer(`Error: Failed to draw video frame to canvas - ${drawError.message || String(drawError)}`);
       setCapturedImage("");
       return;
     }
 
-    console.log('[Click] Canvas 创建完成，开始 OCR...', {
+    console.log('[Click] Canvas created, starting OCR...', {
       canvasSize: { width: canvas.width, height: canvas.height },
       selectionBounds: calculatedBounds,
       videoSize: { width: v.videoWidth, height: v.videoHeight }
@@ -2472,9 +2383,9 @@ export default function Home() {
     let imageDataUrl;
     try {
       imageDataUrl = cropSource.toDataURL();
-      console.log('[Click] WYSIWYG截图成功，长度:', imageDataUrl.length);
+      console.log('[Click] WYSIWYG screenshot successful, length:', imageDataUrl.length);
     } catch (e: any) {
-      console.error('[Click] DataURL失败:', e);
+      console.error('[Click] DataURL failed:', e);
       setIsProcessing(false);
       return;
     }
@@ -2483,9 +2394,9 @@ export default function Home() {
     if (isEnhancementEnabled) {
       const ctx = cropSource.getContext('2d')!;
       enhanceImage(cropSource, ctx);
-      console.log('[Enhancement] ✅ 图像增强已应用');
+      console.log('[Enhancement] ✅ Image enhancement applied');
     } else {
-      console.log('[Enhancement] ⚪ 图像增强已禁用');
+      console.log('[Enhancement] ⚪ Image enhancement disabled');
     }
     
     // 获取处理后的图像用于显示
@@ -2493,12 +2404,12 @@ export default function Home() {
       try { setCapturedImage(imageDataUrl); } catch {}
     }, 0);
     
-    console.log('[Enhancement] 图像增强完成，开始OCR识别...');
+    console.log('[Enhancement] Image enhancement completed, starting OCR recognition...');
 
     try {
       const { data: { text } } = await worker.recognize(cropSource);
       const picked = text.trim().slice(0, 400);
-      console.log('[OCR] 识别结果:', { 
+      console.log('[OCR] Recognition result:', { 
         originalLength: text.length, 
         trimmedLength: picked.length, 
         text: picked 
@@ -2508,7 +2419,7 @@ export default function Home() {
       setDebugInfo(`pressure level: ${level})\n\nrecognized text: ${picked || "(no text detected)"}`);
       if(picked.length === 0) {
         setAnswer("no text detected");
-        console.log('[OCR] 文本为空，可能原因：图像质量、光线、角度、或该区域确实没有文字');
+        console.log('[OCR] Text is empty, possible reasons: image quality, lighting, angle, or the area确实没有文字');
         return;
       }
 
@@ -2519,17 +2430,17 @@ export default function Home() {
         body: JSON.stringify({ text: picked || "No text", level, image: imageDataUrl, streaming: isStreaming }),
       });
 
-      console.log('[LLM] API 调用状态:', resp.status);
+      console.log('[LLM] API call status:', resp.status);
 
       if (!resp.ok) {
-        throw new Error(`LLM API 错误: ${resp.status}`);
+        throw new Error(`LLM API error: ${resp.status}`);
       }
 
       if (isStreaming) {
         // Handle streaming response
         const reader = resp.body?.getReader();
         if (!reader) {
-          throw new Error('无法获取流式响应');
+          throw new Error('Failed to get streaming response');
         }
 
         setAnswer(""); // Clear previous answer
@@ -2597,7 +2508,7 @@ export default function Home() {
                     }
                   }
                 } catch (e) {
-                  console.log('[Streaming] 跳过无效行:', line);
+                  console.log('[Streaming] Skip invalid line:', line);
                 }
               }
             }
@@ -2610,29 +2521,29 @@ export default function Home() {
         const data = await resp.json();
         const content = data.content || "No response";
         
-        console.log('[LLM] 响应完成:', { contentLength: content.length });
+        console.log('[LLM] Response completed:', { contentLength: content.length });
         setAnswer(content);
         
-        // 设置浮窗位置（在选择框旁边）
+        // Set floating window position (next to the selection box)
         if (calculatedBounds) {
-          const containerWidth = 500; // 视频容器宽度
-          const floatingWidth = 240; // 浮窗大约宽度
+          const containerWidth = 500; // video container width
+          const floatingWidth = 240; // floating window approximately width
           
-          // 智能位置：显示在选择框上面
+          // Smart position: display above the selection box
           let floatingX, floatingY;
           
-          // 获取video容器在页面中的位置
+          // Get the position of the video container in the page
           const videoContainer = document.querySelector('.video-container');
           const containerRect = videoContainer?.getBoundingClientRect();
           
           if (containerRect) {
-            // X坐标：相对于页面的绝对位置
+            // X coordinate: absolute position relative to the page
             floatingX = containerRect.left + calculatedBounds.left + calculatedBounds.width / 2;
             
-            // Y坐标：相对于页面的绝对位置，显示在选择框上面
+            // Y coordinate: absolute position relative to the page, display above the selection box
             floatingY = containerRect.top + calculatedBounds.top - 10;
           } else {
-            // 备用方案
+            // Backup solution
             floatingX = calculatedBounds.left + calculatedBounds.width / 2;
             floatingY = calculatedBounds.top - 10;
           }
@@ -2672,7 +2583,7 @@ export default function Home() {
         {/* {deviceInfo && <div className="mt-1 text-xs text-purple-600">📱 {deviceInfo}</div>} */}
       </div>
 
-      {/* 数据采集开关 & 简单统计 */}
+      {/* Data collection开关 & simple statistics */}
       <div className="mb-3 flex flex-wrap gap-3 items-center text-sm">
         <div className="flex items-center gap-2">
           <span className="text-gray-600">data logging:</span>
@@ -2709,7 +2620,7 @@ export default function Home() {
             onAnnotation={(ann) => {
               sessionLogger.addVoiceAnnotation(ann);
               setLastVoiceAnnotation(ann);
-              // 同时将语音内容作为一个“选定的 topic”记录下来
+              // Also record the voice content as a "selected topic"
               if (ann.transcript && ann.transcript.trim()) {
                 sessionLogger.addSelectedTopic({
                   id: `voice-topic-${ann.timestampStart}-${Math.random().toString(36).slice(2, 6)}`,
@@ -3807,49 +3718,9 @@ export default function Home() {
 
       {/* 测试按钮 */}
       <div className="mt-4 flex gap-2 flex-wrap">
-        <button
-          onClick={async () => {
-            console.log('[Test] 测试 OCR 功能');
-            setDebugInfo('test mode: simulate click');
-            if (!ocrReady || !worker) {
-              setAnswer("OCR not ready");
-              return;
-            }
-            
-            // 创建一个测试图片（纯白背景黑字）
-            const canvas = document.createElement("canvas");
-            canvas.width = 300;
-            canvas.height = 100;
-            const ctx = canvas.getContext("2d")!;
-            ctx.fillStyle = "white";
-            ctx.fillRect(0, 0, 300, 100);
-            ctx.fillStyle = "black";
-            ctx.font = "20px Arial";
-            ctx.fillText("Hello World Test", 50, 50);
-            
-            try {
-              setAnswer("test OCR...");
-              const { data: { text } } = await worker.recognize(canvas);
-              setAnswer(`test success! recognized text: "${text.trim()}"`);
-              console.log('[Test] OCR 测试成功:', text);
-            } catch (err: any) {
-              setAnswer(`test failed: ${err.message}`);
-              console.error('[Test] OCR 测试失败:', err);
-            }
-          }}
-          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
-        >
-          🧪 test OCR
-        </button>
+ 
         
-       
-        {/* <button
-          onClick={testWebGLScreenshot}
-          className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
-          title="Three.js 3D渲染截图（真实3D变换，iPad兼容）"
-        >
-          🎮 test Three.js
-        </button> */}
+    
         
         <button
           onClick={() => {
@@ -3897,66 +3768,11 @@ export default function Home() {
         )}
       </div>
 
-      {/* iPad 事件测试区域 */}
-      {/* <div className="mt-4 p-4 border border-dashed border-gray-300 rounded-lg bg-yellow-50">
-        <div className="text-sm font-medium mb-2"> iPad 事件测试区域</div>
-        <div
-          onPointerDown={(e) => {
-            console.log('[TestArea] PointerDown:', e.pointerType, e.pressure);
-            setDebugInfo(`测试区 PointerDown: ${e.pointerType}`);
-          }}
-          onPointerUp={(e) => {
-            console.log('[TestArea] PointerUp:', e.pointerType, e.pressure);
-            setDebugInfo(`测试区 PointerUp: ${e.pointerType} - 事件正常！`);
-          }}
-          onTouchStart={(e) => {
-            console.log('[TestArea] TouchStart:', e.touches.length);
-            setDebugInfo(`测试区 TouchStart: ${e.touches.length} 触点`);
-          }}
-          onTouchEnd={(e) => {
-            console.log('[TestArea] TouchEnd:', e.changedTouches.length);
-            setDebugInfo(`测试区 TouchEnd: ${e.changedTouches.length} 触点 - 事件正常！`);
-          }}
-          className="w-full h-20 bg-white border rounded cursor-pointer flex items-center justify-center text-gray-600"
-          style={{
-            touchAction: 'manipulation',
-            userSelect: 'none',
-            WebkitUserSelect: 'none'
-          }}
-        >
-          点击这里测试事件是否正常 (手指/Apple Pencil)
-        </div>
-        <div className="text-xs text-gray-500 mt-1">
-          如果这个区域能检测到点击，说明事件系统正常，问题可能在视频覆盖层
-        </div>
-      </div> */}
+   
 
  
 
-      {/* 显示WebGL测试截图 */}
-      {webglScreenshot && (
-        <div className="mt-4 p-3 rounded-lg border bg-white max-w-md">
-          <div className="font-medium mb-2">🎮 Three.js 3D渲染截图</div>
-          <img 
-            src={webglScreenshot} 
-            alt="Three.js 3D Render Screenshot" 
-            className="border rounded max-w-full h-auto"
-            style={{ maxHeight: '300px' }}
-          />
-          <div className="text-xs text-gray-500 mt-1">
-            使用Three.js进行真实3D渲染，完全等同于你看到的效果（包含视频、选择框、长按进度环等所有元素）
-          </div>
-          <div className="text-xs text-blue-600 mt-1">
-            ✅ iPad完美兼容 | ✅ 真实3D透视变换 | ✅ 2倍高分辨率 | ✅ 硬件加速 | ✅ 包含所有overlay元素
-          </div>
-          <button
-            onClick={() => setWebglScreenshot("")}
-            className="mt-2 px-2 py-1 bg-gray-500 text-white rounded text-xs hover:bg-gray-600"
-          >
-            Clear
-          </button>
-        </div>
-      )}
+      
 
     </main>
   );

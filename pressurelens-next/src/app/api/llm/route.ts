@@ -1,7 +1,7 @@
 export const runtime = "edge";
 
 export async function POST(req: Request) {
-  const { text, level, image, streaming = false } = await req.json();
+  const { text, level, image, streaming = false, focusHint } = await req.json();
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   if (!OPENAI_API_KEY) {
     return new Response(JSON.stringify({ error: 'OpenAI API key not configured.' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
@@ -26,6 +26,9 @@ The content must be accurate and practical.`;
 
   // Prepare messages for GPT
   const messages = [];
+  const focusText = focusHint
+    ? ` The key area of interest is: ${focusHint}.`
+    : "";
   
   if (image) {
     // If we have an image, use GPT-4 Vision to analyze both text and image
@@ -34,7 +37,7 @@ The content must be accurate and practical.`;
       content: [
         {
           type: "text",
-          text: `I have captured an image and also extracted this text from it using OCR: "${text}". Please analyze the image .The text could be inaccurate,in that case, just ignore it. ${prompt}Please answer in English.`
+          text: `I have captured an image and also extracted this text from it using OCR: "${text}". The text could be inaccurate, in that case, just ignore it. Please analyze the image.${focusText} ${prompt} Please answer in English.`
         },
         {
           type: "image_url",
