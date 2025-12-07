@@ -65,6 +65,8 @@ export default function Home() {
   const [floatingResponse, setFloatingResponse] = useState<{text: string, position: {x: number, y: number}} | null>(null); // 浮窗响应
   const [isDraggingFloat, setIsDraggingFloat] = useState<boolean>(false); // 是否正在拖拽浮窗
   const [perspectiveStrength, setPerspectiveStrength] = useState<number>(67); // 透视强度 0-100
+  // 话题选择 + 语音记录浮窗的展开状态
+  const [isTopicsPanelOpen, setIsTopicsPanelOpen] = useState<boolean>(true);
 
   const [webglScreenshot, setWebglScreenshot] = useState<string>(""); // WebGL截图结果
 
@@ -1166,12 +1168,43 @@ export default function Home() {
               // 使用Three.js投影，获得在overlay上的像素坐标
               const projected = projectVideoUVToOverlay(fingerTip.x, fingerTip.y);
               if (!projected) return;
-              const { x, y } = projected;
-              setFingerTipPosition({ x, y });
+              let { x, y } = projected;
+
+              // 指尖下部视觉补偿：
+              // - MediaPipe 的 fingerTip.y 是 0~1（0=顶部，1=底部）
+              // - 实际观察中，越靠下手指会被透视/warp 拉长，看起来 marker 落在指甲中间
+              // 这里在屏幕坐标上做一个随 y 增大的向下偏移，只作用于 fingerTipPosition，
+              // 不影响视频本身和截图区域。
+              const fingerCompStrength = 0.05; // 可调：0.03~0.08 之间根据实际感觉微调
+              const extraY = fingerCompStrength * (-fingerTip.y) * containerRect.height;
+              y += extraY;
+
+              // === 指尖坐标滤波：低通 + 小抖动死区 ===
+              // rawPos：几何 + 视觉补偿后的原始像素坐标
+              const rawPos = { x: x - 5, y }; // 5px 水平补偿，让小圆点更贴近指尖边缘
+              let smoothedPos = rawPos;
+              const prev = fingerTipPositionRef.current;
+              if (prev) {
+                const dx = rawPos.x - prev.x;
+                const dy = rawPos.y - prev.y;
+                const dist = Math.hypot(dx, dy);
+                const deadZonePx = 2; // 2px 以内视为手抖，直接锁定在上一帧
+                if (dist < deadZonePx) {
+                  smoothedPos = prev;
+                } else {
+                  const alpha = 0.5; // 0~1：越小越平滑但“跟手”会略差
+                  smoothedPos = {
+                    x: prev.x + alpha * dx,
+                    y: prev.y + alpha * dy,
+                  };
+                }
+              }
+
+              setFingerTipPosition(smoothedPos);
               
-              // 兴趣度检测：更新移动轨迹
+              // 兴趣度检测：使用平滑后的坐标更新移动轨迹
               if (isInterestDetectionEnabled) {
-                updateMovementTrail(x, y);
+                updateMovementTrail(smoothedPos.x, smoothedPos.y);
                 
                 // 计算当前兴趣度分数
                 const currentScore = calculateInterestScore(movementTrail);
@@ -1186,7 +1219,8 @@ export default function Home() {
               // 长按检测逻辑（使用ref减少setState）
               if (isFingerLongPressLLMEnabledRef.current) {
                 const currentTime = Date.now();
-                const newPosition = { x, y };
+                //const newPosition = { x, y };
+                const newPosition = smoothedPos;
                 
                 // 检查是否在同一位置（容差范围内）
                 if (longPressRef.current.startPosition) {
@@ -2455,25 +2489,6 @@ export default function Home() {
         >
           download session JSON
         </button>
-        <div className="w-full sm:w-auto">
-          <VoiceTopicRecorder
-            onAnnotation={(ann) => {
-              sessionLogger.addVoiceAnnotation(ann);
-              setLastVoiceAnnotation(ann);
-              // 同时将语音内容作为一个“选定的 topic”记录下来
-              if (ann.transcript && ann.transcript.trim()) {
-                sessionLogger.addSelectedTopic({
-                  id: `voice-topic-${ann.timestampStart}-${Math.random().toString(36).slice(2, 6)}`,
-                  timestamp: ann.timestampEnd,
-                  text: ann.transcript.trim(),
-                  source: "voice",
-                });
-                setLastSelectedTopic(ann.transcript.trim());
-                setTimeout(() => setLastSelectedTopic(null), 1500);
-              }
-            }}
-          />
-        </div>
       </div>
 
       
@@ -3075,8 +3090,8 @@ export default function Home() {
               <div
                 className="absolute w-3 h-3 bg-red-500 rounded-full pointer-events-none border-2 border-white shadow-lg z-20"
                 style={{
-                  left: `${fingerTipPosition.x - 8}px`,
-                  top: `${fingerTipPosition.y - 8}px`,
+                  left: `${fingerTipPosition.x}px`,
+                  top: `${fingerTipPosition.y}px`,
                   animation: isFingerLongPressLLMEnabled && longPressState.isActive ? 'none' : 'pulse 2s infinite'
                 }}
               />
@@ -3086,8 +3101,8 @@ export default function Home() {
                 <div
                   className="absolute pointer-events-none z-30 bg-black bg-opacity-75 text-white text-xs px-2 py-1 rounded shadow-lg"
                   style={{
-                    left: `${fingerTipPosition.x + 16}px`,
-                    top: `${fingerTipPosition.y - 24}px`,
+                    left: `${fingerTipPosition.x + 50}px`,
+                    top: `${fingerTipPosition.y - 50}px`,
                     transform: 'translateX(-50%)',
                     maxWidth: '220px',
                     whiteSpace: 'nowrap',
@@ -3485,43 +3500,6 @@ export default function Home() {
               {regionTopicsError}
             </div>
           )}
-          {regionTopics && regionTopics.length > 0 && (
-            <div className="mt-2 text-xs text-gray-800">
-              <div className="font-medium mb-1">Topics (LLM JSON for recommender):</div>
-              <div className="flex flex-wrap gap-2 mt-1">
-                {regionTopics.map((t, i) => (
-                  <button
-                    key={i}
-                    type="button"
-                    onClick={() => {
-                      const id = `topic-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`;
-                      sessionLogger.addSelectedTopic({
-                        id,
-                        timestamp: Date.now(),
-                        text: t.text,
-                        source: "page_topic",
-                      });
-                      setLastSelectedTopic(t.text);
-                      setTimeout(() => setLastSelectedTopic(null), 1500);
-                    }}
-                    className="px-2 py-1 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 text-[11px]"
-                  >
-                    <span className="font-semibold">{t.text}</span>
-                    {typeof t.weight === "number" && (
-                      <span className="ml-1 text-gray-500">
-                        ({t.weight.toFixed(2)})
-                      </span>
-                    )}
-                    {t.category && (
-                      <span className="ml-1 text-gray-400">
-                        [{t.category}]
-                      </span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -3555,6 +3533,120 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* 话题选择 + 语音记录 浮窗（不遮挡主图像区域，支持折叠） */}
+      <div className="fixed right-4 top-24 z-40 pointer-events-none">
+        <div className="pointer-events-auto w-72 max-w-[80vw] bg-white/90 border border-gray-200 rounded-xl shadow-xl backdrop-blur-sm overflow-hidden">
+          <div
+            className="flex items-center justify-between px-3 py-2 border-b border-gray-200 bg-gray-50 cursor-pointer"
+            onClick={() => setIsTopicsPanelOpen((v) => !v)}
+          >
+            <div className="flex flex-col">
+              <span className="text-xs font-medium text-gray-700">
+                topics &amp; voice notes
+              </span>
+              <span className="text-[10px] text-gray-400">
+                tap to expand / collapse
+              </span>
+            </div>
+            <button
+              type="button"
+              className="ml-2 w-6 h-6 flex items-center justify-center rounded-full bg-gray-200 text-[10px] text-gray-700 hover:bg-gray-300"
+            >
+              {isTopicsPanelOpen ? "−" : "+"}
+            </button>
+          </div>
+
+          {isTopicsPanelOpen && (
+            <div className="p-3 space-y-3 max-h-[60vh] overflow-y-auto">
+              {/* Topics 列表 */}
+              <div className="text-[11px] text-gray-800">
+                <div className="font-medium mb-1 flex items-center justify-between">
+                  <span>Topics (for recommender)</span>
+                  {regionTopicsLoading && (
+                    <span className="text-[10px] text-gray-500 ml-2">
+                      generating...
+                    </span>
+                  )}
+                </div>
+
+                {regionTopicsError && (
+                  <div className="mb-1 text-[10px] text-red-500">
+                    {regionTopicsError}
+                  </div>
+                )}
+
+                {regionTopics && regionTopics.length > 0 ? (
+                  <div className="flex flex-wrap gap-2 mt-1">
+                    {regionTopics.map((t, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => {
+                          const id = `topic-${Date.now()}-${i}-${Math.random()
+                            .toString(36)
+                            .slice(2, 6)}`;
+                          sessionLogger.addSelectedTopic({
+                            id,
+                            timestamp: Date.now(),
+                            text: t.text,
+                            source: "page_topic",
+                          });
+                          setLastSelectedTopic(t.text);
+                          setTimeout(() => setLastSelectedTopic(null), 1500);
+                        }}
+                        className="px-2 py-1 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 text-[11px]"
+                      >
+                        <span className="font-semibold">{t.text}</span>
+                        {/* {typeof t.weight === "number" && (
+                          <span className="ml-1 text-gray-500">
+                            ({t.weight.toFixed(2)})
+                          </span>
+                        )}
+                        {t.category && (
+                          <span className="ml-1 text-gray-400">
+                            [{t.category}]
+                          </span>
+                        )} */}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-1 text-[10px] text-gray-400">
+                    no topics yet — run OCR first
+                  </div>
+                )}
+              </div>
+
+              {/* Voice topic recorder */}
+              <div className="border-t border-dashed border-gray-200 pt-2 mt-1">
+                <div className="text-[11px] text-gray-600 mb-1">
+                  🎙️ press &amp; speak (save as topic)
+                </div>
+                <VoiceTopicRecorder
+                  onAnnotation={(ann) => {
+                    sessionLogger.addVoiceAnnotation(ann);
+                    setLastVoiceAnnotation(ann);
+                    // 同时将语音内容作为一个“选定的 topic”记录下来
+                    if (ann.transcript && ann.transcript.trim()) {
+                      sessionLogger.addSelectedTopic({
+                        id: `voice-topic-${ann.timestampStart}-${Math.random()
+                          .toString(36)
+                          .slice(2, 6)}`,
+                        timestamp: ann.timestampEnd,
+                        text: ann.transcript.trim(),
+                        source: "voice",
+                      });
+                      setLastSelectedTopic(ann.transcript.trim());
+                      setTimeout(() => setLastSelectedTopic(null), 1500);
+                    }
+                  }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* 测试按钮 */}
       <div className="mt-4 flex gap-2 flex-wrap">

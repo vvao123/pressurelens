@@ -12,6 +12,8 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [lastTranscript, setLastTranscript] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  // 暂存一次完整的语音注释，让用户可以选择「保存」或「重说」
+  const [pendingAnnotation, setPendingAnnotation] = useState<VoiceAnnotation | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -65,12 +67,15 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
 
           if (transcript) {
             const ann: VoiceAnnotation = {
-              id: `voice-${startTimeRef.current}-${Math.random().toString(36).slice(2, 8)}`,
+              id: `voice-${startTimeRef.current}-${Math.random()
+                .toString(36)
+                .slice(2, 8)}`,
               timestampStart: startTimeRef.current,
               timestampEnd: endTime,
               transcript,
             };
-            onAnnotation(ann);
+            // 不立刻提交给上层，而是暂存在本地，等用户确认或选择重说
+            setPendingAnnotation(ann);
           }
         } catch (e: any) {
           console.error("[VoiceTopicRecorder] unexpected error", e);
@@ -105,6 +110,19 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
     }
   };
 
+  const handleSave = () => {
+    if (!pendingAnnotation) return;
+    onAnnotation(pendingAnnotation);
+    setPendingAnnotation(null);
+  };
+
+  const handleRedo = () => {
+    // 丢弃当前这次识别结果，让用户重新按住说
+    setPendingAnnotation(null);
+    setLastTranscript("");
+    setError(null);
+  };
+
   return (
     <div className="flex flex-col gap-1 text-xs text-gray-700 max-w-xs">
       <div className="flex items-center gap-2">
@@ -124,9 +142,27 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
           <span className="text-gray-500 ml-1">transcribing...</span>
         )}
       </div>
-      {lastTranscript && (
-        <div className="text-[11px] text-gray-600 line-clamp-2">
-          last: <span className="italic">{lastTranscript}</span>
+      {lastTranscript && pendingAnnotation && (
+        <div className="flex items-start gap-2 text-[11px] text-gray-600">
+          <div className="flex-1 line-clamp-2">
+            last: <span className="italic">{lastTranscript}</span>
+          </div>
+          <div className="flex flex-col gap-1">
+            <button
+              type="button"
+              onClick={handleSave}
+              className="px-10 py-0.5 rounded bg-green-500 text-white text-[10px] hover:bg-green-600"
+            >
+              save
+            </button>
+            <button
+              type="button"
+              onClick={handleRedo}
+              className="px-10 py-0.5 rounded bg-gray-200 text-gray-700 text-[10px] hover:bg-gray-300"
+            >
+              redo
+            </button>
+          </div>
         </div>
       )}
       {error && (
