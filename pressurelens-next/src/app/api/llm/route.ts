@@ -10,8 +10,28 @@ export async function POST(req: Request) {
   // Log the received image data for debugging
   console.log('[LLM API] Received image data:', image ? 'Yes' : 'No');
   console.log('[LLM API] Streaming mode:', streaming);
+  console.log('[LLM API] Level:', level);
 
-  const prompt = level === "light"
+
+  // In finger mode (image + focusHint), the goal is to explain
+  // what the user is pointing at in the screenshot, not just the raw text.
+  const isFingerMode = !!image && !!focusHint;
+
+  const prompt = isFingerMode
+    ? (
+      level === "light"
+        ? `Please briefly explain what the user is pointing at in the image. If there is readable text at that location, first transcribe it and then explain its meaning in 1-2 sentences. If there is no important text, describe the visual content in that area in 1-2 sentences.`
+        : level === "medium"
+        ? `Please clearly explain what the user is pointing at in the image in one short paragraph (3-5 sentences). If there is readable text at that location, first transcribe it and then explain its meaning and context. If there is no important text, describe the visual content in that area and its possible meaning or function.`
+        : `Please explain in detail what the user is pointing at in the image, including:
+1. If there is readable text at that location, first transcribe it and give a detailed explanation of its meaning and context
+2. If there is no important text, describe in detail the visual content in that area and its possible meaning or function
+3. Any relevant background knowledge that helps a non-expert understand
+4. Practical suggestions or notes if applicable
+
+The explanation must be accurate and easy to understand for beginners.`
+    )
+    : level === "light"
     ? `Please define or explain in one sentence: "${text}"`
     : level === "medium"
     ? `Please explain in one paragraph (3-5 sentences) clearly: "${text}", including its meaning and basic usage.`
@@ -22,12 +42,14 @@ export async function POST(req: Request) {
 4. Practical suggestions or notes
 5. If applicable, provide further learning direction
 
-The content must be accurate and practical.`;
+The content must be accurate and practical.
+
+`;
 
   // Prepare messages for GPT
   const messages = [];
   const focusText = focusHint
-    ? ` The key area of interest is: ${focusHint}.`
+    ? `${focusHint}.`
     : "";
   
   if (image) {
@@ -37,7 +59,7 @@ The content must be accurate and practical.`;
       content: [
         {
           type: "text",
-          text: `I have captured an image and also extracted this text from it using OCR: "${text}". The text could be inaccurate, in that case, just ignore it. Please analyze the image.${focusText} ${prompt} Please answer in English.`
+          text: `I have captured an image,  Please analyze the image.${prompt} Please answer in English.${focusText} `
         },
         {
           type: "image_url",
@@ -59,7 +81,7 @@ The content must be accurate and practical.`;
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: image ? "gpt-4o-mini" : "gpt-4o-mini", // Use GPT-4o for vision capabilities
+      model: image ? "gpt-4o" : "gpt-4o-mini", // Use GPT-4o for vision capabilities
       stream: streaming,
       messages: messages
     })

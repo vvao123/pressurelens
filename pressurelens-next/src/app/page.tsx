@@ -364,7 +364,7 @@ export default function Home() {
     minInterestScore: 0.1   // minimum interest score
   };
 
-  // interest detection core algorithm function
+  // speed detection core algorithm function
   const calculateSpeed = (point1: {x: number, y: number, timestamp: number}, point2: {x: number, y: number, timestamp: number}): number => {
     const distance = Math.hypot(point2.x - point1.x, point2.y - point1.y);
     const timeDiff = point2.timestamp - point1.timestamp;
@@ -935,7 +935,7 @@ export default function Home() {
         console.log('[OCR] start initializing Tesseract.js...');
         
         const w = await createWorker('eng', 1, {
-          logger: (m: any) => console.log('[tesseract]', m),
+          // logger: (m: any) => console.log('[tesseract]', m),
         });
         
         console.log('[OCR] Worker initialized!');
@@ -1109,7 +1109,10 @@ export default function Home() {
                   const shouldTrigger = !longPressRef.current.hasTriggered && 
                                        (currentTime - longPressRef.current.startTime) >= longPressConfig.autoTriggerDelay;
                   
-                  // reset ref
+                  // 先保存当前等级，再重置 ref，避免触发等级被覆盖成 light
+                  const prevLevel = longPressRef.current.currentLevel;
+                  
+                  // reset ref（用于后续继续检测新的长按）
                   longPressRef.current = {
                     startTime: currentTime,
                     startPosition: newPosition,
@@ -1118,8 +1121,8 @@ export default function Home() {
                     hasScreenshot: false
                   };
                   
-                  // update state
-                  const triggerLevel = shouldTrigger ? longPressRef.current.currentLevel : false;
+                  // update state，触发时使用之前的等级
+                  const triggerLevel = shouldTrigger ? prevLevel : false;
                   setLongPressState({
                     isActive: false,
                     currentDuration: 0,
@@ -1156,8 +1159,10 @@ export default function Home() {
                                  longPressRef.current.startPosition &&
                                  (Date.now() - longPressRef.current.startTime) >= longPressConfig.autoTriggerDelay;
             
-            // reset ref
-            const triggerLevel = shouldTrigger ? longPressRef.current.currentLevel : false;
+            // 同样先保存当前等级，再重置 ref
+            const prevLevel = longPressRef.current.currentLevel;
+            const triggerLevel = shouldTrigger ? prevLevel : false;
+
             longPressRef.current = {
               startTime: 0,
               startPosition: null,
@@ -1248,23 +1253,26 @@ export default function Home() {
   useEffect(() => {
     if (!isFingerLongPressLLMEnabled) return;
 
-    if (longPressState.isActive && 
-        longPressState.currentLevel === 'hard' &&
-        longPressState.currentDuration >= longPressConfig.hardThreshold && 
-        !longPressRef.current.hasTriggered && 
-        fingerTipPosition && 
-        !isProcessing) {
+    if (
+      longPressState.isActive && 
+      longPressState.currentLevel === 'hard' &&
+      longPressState.currentDuration >= longPressConfig.hardThreshold && 
+      !longPressRef.current.hasTriggered && 
+      fingerTipPosition && 
+      !isProcessing
+    ) {
       
       console.log('[LongPress] hard level reached, automatically trigger OCR, duration:', longPressState.currentDuration);
       
       // mark as triggered
       longPressRef.current.hasTriggered = true;
       
-      // set to hard level
-      setLevel('hard');
       
-      // trigger OCR
-      onFingerSelection();
+      const triggerLevel: Level = 'hard';
+      setLevel(triggerLevel);
+      
+      // trigger OCR with explicit level
+      onFingerSelection(triggerLevel);
     }
   }, [isFingerLongPressLLMEnabled, longPressState.isActive, longPressState.currentDuration, longPressState.currentLevel, fingerTipPosition, isProcessing]);
 
@@ -1274,22 +1282,23 @@ export default function Home() {
   useEffect(() => {
     if (!isFingerLongPressLLMEnabled) return;
 
-    if (longPressState.shouldTriggerOnMove !== false && !isProcessing) {
-      console.log('[LongPress] finger move away/disappear trigger OCR, using level:', longPressState.shouldTriggerOnMove);
-      
-      // mark as triggered
-      longPressRef.current.hasTriggered = true;
-      
-      // set level and trigger OCR
-      setLevel(longPressState.shouldTriggerOnMove);
-      onFingerSelection();
-      
-      // clear trigger flag
-      setLongPressState(prev => ({
-        ...prev,
-        shouldTriggerOnMove: false
-      }));
-    }
+    const triggerLevel = longPressState.shouldTriggerOnMove;
+    if (!triggerLevel || isProcessing) return;
+
+    console.log('[LongPress] finger move away/disappear trigger OCR, using level:', triggerLevel);
+    
+    // mark as triggered
+    longPressRef.current.hasTriggered = true;
+    
+    // set level and trigger OCR with explicit level
+    setLevel(triggerLevel);
+    onFingerSelection(triggerLevel as Level);
+    
+    // clear trigger flag
+    setLongPressState(prev => ({
+      ...prev,
+      shouldTriggerOnMove: false
+    }));
   }, [isFingerLongPressLLMEnabled, longPressState.shouldTriggerOnMove, isProcessing]);
 
     // 3) Apple Pencil pressure three levels (with slight anti-shake)
@@ -1464,7 +1473,7 @@ export default function Home() {
     // create a selection area above the finger
     const areaWidth = 120;  // selection area width
     const areaHeight = 80;  // selection area height
-    const offsetY = -50;   // offset upwards, avoid blocking the finger
+    const offsetY = -60;   // offset upwards, avoid blocking the finger
     
     return {
       left: Math.max(0, fingerPos.x - areaWidth / 2),
@@ -1498,7 +1507,8 @@ export default function Home() {
   };
 
   // 6) finger selection processing function (OCR processing, using the already taken screenshot)
-  const onFingerSelection = async () => {
+  // explicitly pass the triggerLevel to avoid relying on potentially delayed React state
+  const onFingerSelection = async (triggerLevel?: Level) => {
     if (captureLockRef.current) { console.log('[Finger] capture busy, skip'); return; }
     captureLockRef.current = true;
     if (!selectionBounds || !videoReady || !ocrReady || !worker) {
@@ -1517,7 +1527,16 @@ export default function Home() {
     }
     setIsProcessing(true);
     
-    console.log('[Finger] start OCR processing, using the screenshot area:', selectionBounds);
+    console.log(
+      '[Finger] start OCR processing, using the screenshot area:',
+      selectionBounds,
+      'triggerLevel param:',
+      triggerLevel,
+      'current longPress level (ref):',
+      longPressRef.current.currentLevel,
+      'state level:',
+      level
+    );
     
     setDebugInfo(`👆 finger mode: selection area ${selectionBounds.width}×${selectionBounds.height}px`);
     
@@ -1575,7 +1594,12 @@ export default function Home() {
       }, 0);
       
       // OCR recognition
-      console.log('[Finger] start OCR recognition...');
+      console.log('[Finger] start OCR recognition...', {
+        triggerLevel,
+        currentLevelState: level,
+        longPressLevelRef: longPressRef.current.currentLevel,
+        longPressStateSnapshot: longPressState
+      });
       const { data: { text } } = await worker.recognize(cropCanvas);
       const picked = text.trim().slice(0, 400);
       
@@ -1585,13 +1609,24 @@ export default function Home() {
         text: picked 
       });
       
-      setAnswer(`👆 finger mode: call LLM... (level: ${level})\n\ntext: ${picked || "(no text detected)"}`);
+      // use the triggerLevel if provided, otherwise use the ref's current level, and finally fall back to the state level
+      const finalLevel: Level =
+        triggerLevel ||
+        longPressRef.current.currentLevel ||
+        level;
+      console.log('[Finger] prepare to call LLM with level:', finalLevel, {
+        triggerLevel,
+        stateLevel: level,
+        refLevel: longPressRef.current.currentLevel,
+      });
+
+      setAnswer(`👆 finger mode: call LLM... (level: ${finalLevel})\n\ntext: ${picked || "(no text detected)"}`);
       
-      if(picked.length === 0) {
-        setAnswer("👆 finger mode: no text detected");
-        console.log('[Finger] text is empty');
-        return;
-      }
+      // if(picked.length === 0) {
+      //   setAnswer("👆 finger mode: no text detected");
+      //   console.log('[Finger] text is empty');
+      //   return;
+      // }
       
       // call LLM (finger mode: tell LLM the finger position in the middle of the screenshot)
       const resp = await fetch("/api/llm", {
@@ -1599,10 +1634,10 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           text: picked || "No text",
-          level,
+          level: finalLevel,
           image: imageDataUrl,
           streaming: isStreaming,
-          focusHint: "The user is pointing at the text located near the bottom center of the screenshot.Focus your explanation on the phrase or words closest to that region.",
+          focusHint: "This image is a cropped region directly above the user's fingertip.Please analyze or explain the text contained in this cropped region, if any.If the image contains no meaningful text, simply describe what is visible.",
         }),
       });
       
@@ -2257,7 +2292,7 @@ export default function Home() {
         {/* {deviceInfo && <div className="mt-1 text-xs text-purple-600">📱 {deviceInfo}</div>} */}
       </div>
 
-      {/* Data collection开关 & simple statistics */}
+      {/* data collection switch & simple statistics */}
       {/* <div className="mb-3 flex flex-wrap gap-3 items-center text-sm">
         <div className="flex items-center gap-2">
           <span className="text-gray-600">data logging:</span>
@@ -2342,7 +2377,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* 模式切换 */}
+      {/* input mode switch */}
       <div className="mb-3 flex gap-2 items-center">
         <span className="text-sm text-gray-600">input mode:</span>
         <button
@@ -2350,7 +2385,7 @@ export default function Home() {
             setHandDetectionMode('pencil');
             setIsHandDetectionEnabled(false);
             setFingerTipPosition(null);
-            // setDebugInfo('切换到 Apple Pencil 模式');
+          
           }}
           className={`px-3 py-1 rounded text-sm transition-colors ${
             handDetectionMode === 'pencil'
@@ -2366,7 +2401,7 @@ export default function Home() {
             setIsHandDetectionEnabled(true);
             setDrawingPath([]);
             setSelectionBounds(null);
-            // setDebugInfo('切换到手指检测模式，请将手指指向纸面文字');
+          
           }}
           className={`px-3 py-1 rounded text-sm transition-colors ${
             handDetectionMode === 'finger'
@@ -2403,11 +2438,11 @@ export default function Home() {
 
       
 
-      {/* Apple Pencil 1代手动level切换 */}
+      
       <div className="mb-3 flex gap-2">
         <span className="text-sm text-gray-600">pressure level:</span>
         {(['light', 'medium', 'hard'] as Level[]).map((l) => {
-          // 如果正在按压，显示currentMaxLevel；否则显示设定的level
+          // if pressed, display currentMaxLevel; otherwise display the set level
           const isActive = isPressed ? (currentMaxLevel === l) : (level === l);
           
           return (
@@ -2428,7 +2463,7 @@ export default function Home() {
         })}
       </div>
 
-      {/* 流式显示切换 */}
+      {/* streaming mode switch */}
       <div className="mb-3 flex gap-2 items-center">
         <span className="text-sm text-gray-600">response mode:</span>
         <button
@@ -2517,6 +2552,67 @@ export default function Home() {
         <span className="text-xs text-gray-500">
           (near large, far small effect)
         </span>
+      </div>
+       {/* test button */}
+       <div className="mt-4 flex gap-2 flex-wrap">
+        {/* <button
+          onClick={() => {
+            setDebugInfo('');
+            setAnswer('');
+            setFloatingResponse(null); // 
+          }}
+          className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 text-sm"
+        >
+          clear
+        </button> */}
+        
+ 
+        <button
+          onClick={() => {
+            const video = videoRef.current;
+            if (video && !video.paused) {
+              video.pause();
+              setIsVideoFrozen(true);
+              setDebugInfo('⏸ image frozen');
+            }
+          }}
+          className="px-4 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600 text-sm"
+        >
+          ⏸ freeze image
+        </button>
+
+
+        {/* <button
+          onClick={() => {
+            setVideoScale(1);
+            setVideoTranslate({x: 0, y: 0});
+            setPerspectiveStrength(0);
+            setDebugInfo('🔄 reset');
+          }}
+          className="px-4 py-2 bg-indigo-500 text-white rounded hover:bg-indigo-600 text-sm"
+        >
+          🔄 reset
+        </button> */}
+        
+   
+        {isVideoFrozen && (
+          <button
+            onClick={() => {
+              const video = videoRef.current;
+              if (video) {
+                video.play().catch(console.error);
+                setIsVideoFrozen(false);
+                setDrawingPath([]);
+                setSelectionBounds(null);
+                setCapturedImage("");
+                setDebugInfo('▶️ image resumed');
+              }
+            }}
+            className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
+          >
+            ▶️ resume
+          </button>
+        )}
       </div>
 
               <div 
@@ -2960,7 +3056,7 @@ export default function Home() {
       </div>
 
       {/* main page: OCR operation in the visible region */}
-      <div className="mt-4 flex gap-2 flex-wrap">
+      {/* <div className="mt-4 flex gap-2 flex-wrap">
         <button
           onClick={runRegionOCR}
           className="px-3 py-2 rounded-md text-white disabled:opacity-50"
@@ -2975,7 +3071,7 @@ export default function Home() {
         >
           Clear OCR Region
         </button>
-      </div>
+      </div> */}
 
       {/* Region OCR debug: only show the image and recognized text when the OCR Region button is triggered */}
       {(regionCapturedImage || regionRecognizedText) && (
@@ -3075,61 +3171,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* test button */}
-      <div className="mt-4 flex gap-2 flex-wrap">
- 
-        
-    
-        
-        <button
-          onClick={() => {
-            setDebugInfo('');
-            setAnswer('');
-            setFloatingResponse(null); // 清除浮窗
-          }}
-          className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 text-sm"
-        >
-          clear
-        </button>
-        
-        <button
-          onClick={() => {
-            setVideoScale(1);
-            setVideoTranslate({x: 0, y: 0});
-            setPerspectiveStrength(0);
-            setDebugInfo('🔄 reset');
-          }}
-          className="px-4 py-2 bg-indigo-500 text-white rounded hover:bg-indigo-600 text-sm"
-        >
-          🔄 reset
-        </button>
-        
-        
-        {isVideoFrozen && (
-          <button
-            onClick={() => {
-              const video = videoRef.current;
-              if (video) {
-                video.play().catch(console.error);
-                setIsVideoFrozen(false);
-                setDrawingPath([]);
-                setSelectionBounds(null);
-                setCapturedImage("");
-              }
-            }}
-            className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
-          >
-            ▶️ reset
-          </button>
-        )}
-      </div>
-
-   
-
- 
-
-      
-
+     
     </main>
   );
 }
