@@ -4,8 +4,8 @@
 // type OcrRegion = { left: number; top: number; width: number; height: number };
 
 // /**
-//  * 将 OCR 词框坐标从高分辨率裁剪坐标系映射到屏幕像素坐标系，
-//  * 使用与 page.tsx 中绘制 overlay 相同的逻辑。
+//  * Map OCR word boxes from high-res crop coordinates to screen pixels,
+//  * using the same logic as the overlay drawing in page.tsx.
 //  */
 // function projectWordToScreen(
 //   word: WordBBox,
@@ -29,23 +29,23 @@
 //   if (!words || !words.length || !region || !ocrScale || !pointer) return null;
 //   const dpr = opts?.dpr ?? (typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1);
 
-//   // 几何直觉（以屏幕像素为单位）：
-//   // - 一行文字的行高大约 20~40px（视字体而定）；
-//   // - 对“正上方”的理解：在手指上方一小段垂直带内，横向偏移很小；
-//   // - 只有当这条“竖直带”里找不到合适的 box，或者 box 离手指太远，
-//   //   才退而在更宽的行带里找左右相邻的词。
+//   // Geometry intuition (screen pixels):
+//   // - Line height is roughly 20~40px (depends on font);
+//   // - "Directly above" means a narrow vertical band above the finger;
+//   // - Only if no suitable box is found in that band or it's too far,
+//   //   fall back to a wider row band to find nearby words.
 //   //
-//   // 因此这里分两层：
-//   // 1) column 候选：严格“正上方一列”的词
-//   // 2) row  候选：同一行附近、左右扩展一些的词
+//   // Two layers here:
+//   // 1) column candidates: strictly the "above column"
+//   // 2) row candidates: nearby words in the same row, with wider tolerance
 
-//   // 垂直窗口：只看手指上方 30px 以内
+//   // Vertical window: only within 30px above the finger
 //   const LINE_UP_MAX = 30;
-//   // 正上方“竖直带”的最大水平偏移（列宽）
+//   // Max horizontal offset for the above "column" band
 //   const COLUMN_X_TOL = 25;
-//   // 行内允许的最大水平偏移（左右各）
+//   // Max horizontal offset within the row (left/right)
 //   const ROW_X_TOL = 80;
-//   // 如果正上方词离手指太远（> 20px），就认为“不够准”，允许考虑旁边行内词
+//   // If the above word is too far (> 20px), consider nearby row words
 //   const MAX_COLUMN_DIST_Y = 20;
 
 //   let bestColumn: NearestWordInfo | null = null;
@@ -59,17 +59,17 @@
 //   for (const w of words) {
 //     const center = projectWordToScreen(w, region, ocrScale, dpr);
 //     const dx = center.x - pointer.x;
-//     const dy = center.y - pointer.y; // dy < 0: 在手指上方；dy > 0: 在手指下方
+//     const dy = center.y - pointer.y; // dy < 0: above finger; dy > 0: below finger
 
 //     const absDx = Math.abs(dx);
 //     const absDy = Math.abs(dy);
 
-//     // 1) 先收集“正上方一列”的候选：在 finger 正上方的小竖条里
-//     //    条件：在手指上方（不允许低于手指），且高度不超过一行（LINE_UP_MAX）
+//     // 1) Collect strict "above column" candidates in a narrow band
+//     //    Conditions: above the finger (not below), within LINE_UP_MAX
 //     if (dy <= -2 && dy >= -LINE_UP_MAX && absDx <= COLUMN_X_TOL) {
 //       if (
-//         absDy < bestColumnDy - 1 || // Y 明显更近
-//         (Math.abs(absDy - bestColumnDy) <= 1 && absDx < bestColumnDx) // Y 差不多时，选 X 更近的
+//         absDy < bestColumnDy - 1 || // Y clearly closer
+//         (Math.abs(absDy - bestColumnDy) <= 1 && absDx < bestColumnDx) // If Y similar, pick closer X
 //       ) {
 //         bestColumnDy = absDy;
 //         bestColumnDx = absDx;
@@ -81,9 +81,9 @@
 //       }
 //     }
 
-//     // 2) 再收集“同一行附近”的候选：允许稍微偏左/偏右，或略高/略低一些
-//     //    条件：仍然限制在手指上方一行内（-LINE_UP_MAX ~ 0），不考虑明显在下方的词；
-//     //    横向窗口更宽，用于在“正上方没有理想候选”时，选择邻近的词。
+//     // 2) Collect "nearby row" candidates: allow some left/right offset
+//     //    Still within one line above (-LINE_UP_MAX ~ 0), not below;
+//     //    Wider horizontal window for fallback when no strict candidate.
 //     if (dy <= 0 && dy >= -LINE_UP_MAX && absDx <= ROW_X_TOL) {
 //       if (
 //         absDy < bestRowDy - 1 ||
@@ -100,17 +100,17 @@
 //     }
 //   }
 
-//   // 先尝试返回“正上方一列”的词，只要不离得太远
+//   // Prefer the strict above-column word if not too far
 //   if (bestColumn && bestColumnDy <= MAX_COLUMN_DIST_Y) {
 //     return bestColumn;
 //   }
 
-//   // 否则，如果同一行附近有词，再退到行内最近的
+//   // Otherwise, fall back to the nearest word in the row
 //   if (bestRow) {
 //     return bestRow;
 //   }
 
-//   // 再否则，就认为此处没有合适的词
+//   // Otherwise, no suitable word
 //   return null;
 // }
 import type { WordBBox } from "../ocr/tesseract";
@@ -118,7 +118,7 @@ import type { NearestWordInfo } from "./types";
 
 type OcrRegion = { left: number; top: number; width: number; height: number };
 
-// 辅助：计算屏幕坐标
+// Helper: compute screen coordinates
 function projectWordToScreen(
   word: WordBBox,
   region: OcrRegion,
@@ -139,22 +139,22 @@ function projectWordToScreen(
   };
 }
 
-// 核心辅助函数：判断两个垂直区间是否显著重叠
-// 判断 word 是否属于 line (根据 line 的当前边界)
+// Core helper: check whether two vertical ranges significantly overlap
+// Check whether a word belongs to a line (based on current line bounds)
 function isSameLine(
   lineBox: { top: number; bottom: number }, 
   wordBox: { top: number; bottom: number }
 ): boolean {
-  // 1. 计算重叠部分的高度
+  // 1) Compute overlap height
   const intersectionTop = Math.max(lineBox.top, wordBox.top);
   const intersectionBottom = Math.min(lineBox.bottom, wordBox.bottom);
   const overlapHeight = Math.max(0, intersectionBottom - intersectionTop);
 
-  // 2. 计算当前词的高度
+  // 2) Compute word height
   const wordHeight = wordBox.bottom - wordBox.top;
 
-  // 3. 判定标准：如果重叠高度超过词本身高度的 50%，或者超过行高度的 50%
-  // 这种相对比例判定，对大字小字都适用。
+  // 3) Criterion: overlap > 50% of word height or line height
+  // Relative thresholds work for both large and small text.
   if (wordHeight === 0) return false;
   return (overlapHeight / wordHeight) > 0.5;
 }
@@ -170,18 +170,18 @@ export function getNearestOcrWord(
   const dpr = opts?.dpr ?? (typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1);
 
   // ============================================
-  // Step 1: 粗略筛选候选集 (ROI)
+  // Step 1: coarse candidate filtering (ROI)
   // ============================================
   const ROI_X = 50; 
   const ROI_Y_TOP = 20; 
-  const ROI_Y_BOTTOM = 10; // 稍微放宽一点
+  const ROI_Y_BOTTOM = 10; // Slightly relaxed
 
   const candidates = [];
 
   for (const w of words) {
     const screenWord = projectWordToScreen(w, region, ocrScale, dpr);
     
-    // 边缘距离计算
+    // Edge distance calculation
     const left = screenWord.bbox.x;
     const right = screenWord.bbox.x + screenWord.bbox.w;
     let dx = 0;
@@ -202,18 +202,18 @@ export function getNearestOcrWord(
   if (candidates.length === 0) return null;
 
   // ============================================
-  // Step 2: 自适应行聚类 (Vertical Overlap)
+  // Step 2: adaptive line clustering (vertical overlap)
   // ============================================
   
-  // 1. 先按 Top 排序，保证我们是从上往下处理
+  // 1) Sort by top so we process top-down
   candidates.sort((a, b) => a.bbox.y - b.bbox.y);
 
   type LineGroup = {
     words: typeof candidates;
-    // 记录这一行的“并集”边界，用于判断后续单词是否属于该行
+    // Track union bounds for this line to decide membership
     unionTop: number;   
     unionBottom: number;
-    // 记录统计值用于最终决策
+    // Stats for final decision
     avgBottom: number; 
   };
 
@@ -225,18 +225,18 @@ export function getNearestOcrWord(
     
     let added = false;
     
-    // 尝试把词加入已有的行 (通常只需要检查最后一行，因为是排好序的，但也可能出现重叠布局)
-    // 这里为了保险，我们可以遍历所有已生成的行（通常就1-3行）
+    // Try to add the word to an existing line (often last line is enough,
+    // but overlapping layouts can happen, so scan all lines for safety)
     for (const line of lines) {
       if (isSameLine({ top: line.unionTop, bottom: line.unionBottom }, { top: wTop, bottom: wBottom })) {
         line.words.push(word);
         
-        // 动态更新该行的垂直边界范围 (取并集)
-        // 这样如果一行里有个很高的字，它会撑大这一行的捕获范围
+        // Update line vertical bounds (union)
+        // Tall words expand the capture range for that line
         line.unionTop = Math.min(line.unionTop, wTop);
         line.unionBottom = Math.max(line.unionBottom, wBottom);
         
-        // 更新 avgBottom
+        // Update avgBottom
         const n = line.words.length;
         line.avgBottom = (line.avgBottom * (n - 1) + wBottom) / n;
         
@@ -245,7 +245,7 @@ export function getNearestOcrWord(
       }
     }
 
-    // 如果不属于任何现有行，创建新行
+    // If it doesn't fit any existing line, create a new line
     if (!added) {
       lines.push({
         words: [word],
@@ -255,14 +255,14 @@ export function getNearestOcrWord(
       });
     }
   }
-  // 【新增修复】：对每一行内部的词，按 X 轴 (Left) 重新排序
-  // 这样 console.log 打印出来的句子才是通顺的，逻辑也更符合直觉
+  // [Fix] Sort words within each line by X (left)
+  // This keeps logged sentences in order and matches intuition
   lines.forEach(line => {
     line.words.sort((a, b) => a.bbox.x - b.bbox.x);
   });
-    // 【调试点 3】: 观察聚类结果 (非常关键！)
-  // 观察：本来是一行字，被分成了几行？
-  // 如果明明是一行却显示 length: 2，说明 isSameLine 判断太严格。
+    // [Debug 3]: inspect clustering results (critical)
+  // Observe: did one line get split into several?
+  // If a single line shows length: 2, isSameLine is too strict.
   console.log('[OCR] Step 2 Clusters:', lines.map(l => ({
     textPreview: l.words.map(w => w.original.text).join(' '), 
     avgBottom: Math.round(l.avgBottom),
@@ -271,25 +271,25 @@ export function getNearestOcrWord(
 
 
   // ============================================
-  // Step 3: 选择“最佳行”
+  // Step 3: choose the "best line"
   // ============================================
-  // 逻辑：找到 Bottom 在手指上方（或附近）的那一行
+  // Logic: find the line whose bottom is above/near the finger
   
   let bestLine: LineGroup | null = null;
   let minLineDist = Infinity;
 
   for (const line of lines) {
-    // 指读判定：手指应当位于文字底部的下方
-    // diff > 0: 手指在文字下方 (正常)
-    // diff < 0: 手指在文字上方 (遮挡)
+    // Pointer reading rule: finger should be below the text bottom
+    // diff > 0: finger below text (normal)
+    // diff < 0: finger above text (occluding)
     const distToLineBottom = pointer.y - line.avgBottom;
-    // 【调试点 4】: 观察行选择逻辑
-    // 观察：为什么选中了这一行？distToLineBottom 是正数还是负数？
+    // [Debug 4]: inspect line selection logic
+    // Observe: why this line? Is distToLineBottom positive or negative?
     // console.log(`[OCR] Checking Line: "${line.words[0].original.text}...", distToBottom: ${distToLineBottom.toFixed(1)}`);
 
 
-    // 宽松判定：允许手指稍微盖住文字底部 15px (distToLineBottom > -15)
-    // 但不能太远，比如手指在文字下方 50px 处，那可能已经指到下一行空白了，不应该算这一行
+    // Lenient rule: allow finger to cover bottom by 15px (distToLineBottom > -15)
+    // But not too far; 50px below likely points to next line's blank area
     if (distToLineBottom > -15 && distToLineBottom < 60) {
       const absDist = Math.abs(distToLineBottom);
       if (absDist < minLineDist) {
@@ -302,14 +302,14 @@ export function getNearestOcrWord(
   if (!bestLine) return null;
 
   // ============================================
-  // Step 4: 边缘距离选词 (同前)
+  // Step 4: choose word by edge distance (same as before)
   // ============================================
   let bestWord: NearestWordInfo | null = null;
   let minDx = Infinity;
 
-  // 为 NearestWordInfo 准备行上下文：
-  // - linesText: 所有行的 w.original.text 列表（按从上到下、从左到右）
-  // - bestLineIndex: 指明哪一行是当前选中的“最佳行”
+  // Prepare line context for NearestWordInfo:
+  // - linesText: all lines' w.original.text lists (top-to-bottom, left-to-right)
+  // - bestLineIndex: indicates the currently selected "best line"
   const allLinesText = lines.map((l) => l.words.map((w) => w.original.text));
   const bestLineIndex = Math.max(0, lines.indexOf(bestLine));
   const lineContext = {

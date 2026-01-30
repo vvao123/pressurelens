@@ -12,6 +12,7 @@
     "@types/html2canvas": "^0.5.35",
     "@types/three": "^0.180.0",
     "html2canvas": "^1.4.1",
+    "jszip": "^3.10.1",
     "next": "15.5.2",
     "react": "19.1.0",
     "react-dom": "19.1.0",

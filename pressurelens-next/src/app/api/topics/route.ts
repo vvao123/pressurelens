@@ -122,12 +122,12 @@ Here is the OCR text (may contain noise or errors, be robust when extracting top
       );
     }
 
-    // content 本身应该已经是 JSON 字符串，但为了保证一定是 JSON，我们再 parse 一次
+    // content should already be a JSON string, but parse again to be safe
     let parsed;
     try {
       parsed = JSON.parse(content);
     } catch {
-      // 如果解析失败，就包装成标准结构，避免前端直接崩溃
+      // If parsing fails, wrap into a standard structure to avoid frontend crashes
       parsed = { raw: content };
     }
 

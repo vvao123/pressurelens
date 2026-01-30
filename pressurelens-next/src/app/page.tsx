@@ -13,7 +13,7 @@ type Level = "light" | "medium" | "hard";
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
-  const threeCanvasRef = useRef<HTMLCanvasElement>(null); // Three.js渲染canvas
+  const threeCanvasRef = useRef<HTMLCanvasElement>(null); // Three.js render canvas
   const threeRendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const threeSceneRef = useRef<THREE.Scene | null>(null);
   const threeCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
@@ -21,25 +21,25 @@ export default function Home() {
   const threeMeshRef = useRef<THREE.Mesh | null>(null);
   const threeTextureRef = useRef<THREE.VideoTexture | null>(null);
   const animationFrameRef = useRef<number | null>(null);
-  const threePivotBaseYRef = useRef<number>(0); // 记录顶部轴心的基准Y
+  const threePivotBaseYRef = useRef<number>(0); // Record baseline Y for top pivot
   const shaderUniformsRef = useRef<{ u_map: { value: THREE.Texture | null }; u_comp: { value: number } } | null>(null);
-  const [warpCompensation, setWarpCompensation] = useState<number>(0.5); // 0~0.5 建议范围，0为关闭
-  // 用 ref 保存最新的 warpCompensation，避免 MediaPipe 回调里闭包拿到旧值
+  const [warpCompensation, setWarpCompensation] = useState<number>(0.5); // Suggested range 0~0.5, 0 disables
+  // Keep latest warpCompensation in ref to avoid stale closures in MediaPipe callbacks
   const warpCompensationRef = useRef<number>(warpCompensation);
-  // 用 ref 保存 finger long-press LLM 的开关状态，避免 MediaPipe 回调里拿到旧值
+  // Keep finger long-press LLM toggle in ref to avoid stale closures in MediaPipe callbacks
   const isFingerLongPressLLMEnabledRef = useRef<boolean>(true);
   const offscreenRendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const captureLockRef = useRef<boolean>(false);
   const ocrOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   
-  // 长按检测的ref，避免频繁setState
+  // Long-press detection ref to avoid frequent setState
   const longPressRef = useRef({
     startTime: 0,
     startPosition: null as {x: number, y: number} | null,
     currentLevel: 'light' as Level,
     hasTriggered: false,
-    hasScreenshot: false // 是否已经截屏
+    hasScreenshot: false // Whether a screenshot has been taken
   });
 
   const [level, setLevel] = useState<Level>("light");
@@ -53,24 +53,25 @@ export default function Home() {
   const [currentPressure, setCurrentPressure] = useState<number>(0);
   const [isUsingPen, setIsUsingPen] = useState<boolean>(false);
   const [currentMaxLevel, setCurrentMaxLevel] = useState<Level>("light"); // current max level
-  const [isPressed, setIsPressed] = useState<boolean>(false); // 是否正在按压
-  const [isVideoFrozen, setIsVideoFrozen] = useState<boolean>(false); // 视频是否被冻结
-  const [drawingPath, setDrawingPath] = useState<{x: number, y: number}[]>([]); // 绘制路径
-  const [selectionBounds, setSelectionBounds] = useState<{left: number, top: number, width: number, height: number} | null>(null); // 选择区域边界
-  const [isStreaming, setIsStreaming] = useState<boolean>(false); // 是否启用流式显示
-  const [isProcessing, setIsProcessing] = useState<boolean>(false); // 防止重复处理
-  const [isEnhancementEnabled, setIsEnhancementEnabled] = useState<boolean>(false); // 是否启用图像增强
-  const [videoScale, setVideoScale] = useState<number>(1.49); // 视频缩放比例
-  const [videoTranslate, setVideoTranslate] = useState<{x: number, y: number}>({x: 0, y: 0}); // 视频平移位置
-  const [floatingResponse, setFloatingResponse] = useState<{text: string, position: {x: number, y: number}} | null>(null); // 浮窗响应
-  const [isDraggingFloat, setIsDraggingFloat] = useState<boolean>(false); // 是否正在拖拽浮窗
-  const [perspectiveStrength, setPerspectiveStrength] = useState<number>(67); // 透视强度 0-100
-  // 话题选择 + 语音记录浮窗的展开状态
+  const [isPressed, setIsPressed] = useState<boolean>(false); // Whether currently pressing
+  const [isVideoFrozen, setIsVideoFrozen] = useState<boolean>(false); // Whether video is frozen
+  const [drawingPath, setDrawingPath] = useState<{x: number, y: number}[]>([]); // Drawing path
+  const [selectionBounds, setSelectionBounds] = useState<{left: number, top: number, width: number, height: number} | null>(null); // Selection bounds
+  const [isStreaming, setIsStreaming] = useState<boolean>(false); // Enable streaming output
+  const [isProcessing, setIsProcessing] = useState<boolean>(false); // Prevent duplicate processing
+  const [isEnhancementEnabled, setIsEnhancementEnabled] = useState<boolean>(false); // Enable image enhancement
+  const [videoScale, setVideoScale] = useState<number>(1.49); // Video scale
+  const [videoTranslate, setVideoTranslate] = useState<{x: number, y: number}>({x: 0, y: 0}); // Video translation
+  const [floatingResponse, setFloatingResponse] = useState<{text: string, position: {x: number, y: number}} | null>(null); // Floating response
+  const [isDraggingFloat, setIsDraggingFloat] = useState<boolean>(false); // Dragging floating panel
+  const [perspectiveStrength, setPerspectiveStrength] = useState<number>(67); // Perspective strength 0-100
+  // Topics + voice notes panel open state
   const [isTopicsPanelOpen, setIsTopicsPanelOpen] = useState<boolean>(true);
+  const [pageIndex, setPageIndex] = useState<number>(1);
 
-  const [webglScreenshot, setWebglScreenshot] = useState<string>(""); // WebGL截图结果
+  const [webglScreenshot, setWebglScreenshot] = useState<string>(""); // WebGL screenshot result
 
-  // OCR 选区结果（主页）
+  // OCR selection results (main page)
   const [ocrWordsInRegion, setOcrWordsInRegion] = useState<WordBBox[] | null>(null);
   const [ocrRegion, setOcrRegion] = useState<{left: number; top: number; width: number; height: number} | null>(null);
   const [ocrScale, setOcrScale] = useState<number>(2);
@@ -82,13 +83,34 @@ export default function Home() {
   const [regionTopicsLoading, setRegionTopicsLoading] = useState(false);
   const [regionTopicsError, setRegionTopicsError] = useState<string | null>(null);
 
-  // 数据采集开关
+  // Data logging toggle
   const [isLoggingEnabled, setIsLoggingEnabled] = useState<boolean>(false);
   const [lastVoiceAnnotation, setLastVoiceAnnotation] = useState<VoiceAnnotation | null>(null);
 
-  // 主页：OCR 选区处理
+  useEffect(() => {
+    sessionLogger.setPageIndex(pageIndex);
+  }, [pageIndex]);
+
+  const resetSessionForNewPage = () => {
+    const s = sessionLogger.getSummary();
+    const hasLogs =
+      s.pointerSamples > 0 ||
+      s.voiceAnnotations > 0 ||
+      s.selectedTopics > 0 ||
+      s.hasPageOcr;
+    if (hasLogs) {
+      sessionLogger.exportJson(deviceInfo);
+      setDownloadToast("✅ save current page package and ready for new page");
+      setTimeout(() => setDownloadToast(null), 1500);
+      setPageIndex((prev) => prev + 1);
+    }
+    sessionLogger.reset();
+    
+  };
+
+  // Main page: OCR selection handling
   const runRegionOCR = async () => {
-    // 对当前可视容器整体做 OCR（不依赖蓝色选区）
+    // Run OCR on the full visible container (no blue selection required)
     const container = document.querySelector('.video-container') as HTMLElement | null;
     if (!container) return;
     const region = {
@@ -116,7 +138,7 @@ export default function Home() {
       setRegionRecognizedText(fullText);
     } catch {}
 
-    // 将整页 OCR 文本写入 sessionLogger，并调用 LLM 提取 topics
+    // Save full-page OCR text into sessionLogger and call LLM for topics
     if (!fullText) {
       setRegionTopics([]);
       sessionLogger.setPageOcr({ pageText: "", pageTopics: [] });
@@ -164,7 +186,7 @@ export default function Home() {
     setRegionTopicsError(null);
   };
 
-  // 绘制 OCR 叠加词框到 ocrOverlayCanvas
+  // Draw OCR overlay word boxes onto ocrOverlayCanvas
   useEffect(() => {
     const c = ocrOverlayCanvasRef.current;
     const container = document.querySelector(".video-container") as HTMLElement | null;
@@ -195,35 +217,35 @@ export default function Home() {
     }
   }, [ocrWordsInRegion, ocrRegion, ocrScale, videoScale, videoTranslate]);
 
-  // 手指检测相关状态
-  const [handResults, setHandResults] = useState<any>(null); // MediaPipe 检测结果
-  const [fingerTipPosition, setFingerTipPosition] = useState<{x: number, y: number} | null>(null); // 指尖位置
-  const [isHandDetectionEnabled, setIsHandDetectionEnabled] = useState<boolean>(false); // 是否启用手指检测
-  const [handDetectionMode, setHandDetectionMode] = useState<'pencil' | 'finger'>('pencil'); // 输入模式
-  const [handsInstance, setHandsInstance] = useState<any>(null); // MediaPipe Hands 实例
+  // Hand detection state
+  const [handResults, setHandResults] = useState<any>(null); // MediaPipe detection results
+  const [fingerTipPosition, setFingerTipPosition] = useState<{x: number, y: number} | null>(null); // Fingertip position
+  const [isHandDetectionEnabled, setIsHandDetectionEnabled] = useState<boolean>(false); // Enable hand detection
+  const [handDetectionMode, setHandDetectionMode] = useState<'pencil' | 'finger'>('pencil'); // Input mode
+  const [handsInstance, setHandsInstance] = useState<any>(null); // MediaPipe Hands instance
   
-  // 用户兴趣度检测相关状态
-  const [isInterestDetectionEnabled, setIsInterestDetectionEnabled] = useState<boolean>(false); // 是否启用兴趣度检测
-  const [movementTrail, setMovementTrail] = useState<Array<{x: number, y: number, timestamp: number, speed: number}>>([]); // 移动轨迹
+  // User interest detection state
+  const [isInterestDetectionEnabled, setIsInterestDetectionEnabled] = useState<boolean>(false); // Enable interest detection
+  const [movementTrail, setMovementTrail] = useState<Array<{x: number, y: number, timestamp: number, speed: number}>>([]); // Movement trail
 
-  // 同步 warpCompensation 到 ref，供 MediaPipe 回调和 Three 投影使用
+  // Sync warpCompensation to ref for MediaPipe callbacks and Three.js projection
   useEffect(() => {
     warpCompensationRef.current = warpCompensation;
   }, [warpCompensation]);
-  const [interestHeatmap, setInterestHeatmap] = useState<Map<string, number>>(new Map()); // 兴趣热点图
-  const [currentInterestScore, setCurrentInterestScore] = useState<number>(0); // 当前兴趣度分数
-  const [detectedKeywords, setDetectedKeywords] = useState<string[]>([]); // 检测到的关键词
+  const [interestHeatmap, setInterestHeatmap] = useState<Map<string, number>>(new Map()); // Interest heatmap
+  const [currentInterestScore, setCurrentInterestScore] = useState<number>(0); // Current interest score
+  const [detectedKeywords, setDetectedKeywords] = useState<string[]>([]); // Detected keywords
   const [interestAnalysis, setInterestAnalysis] = useState<{
     totalInterestScore: number;
     averageSpeed: number;
     focusAreas: Array<{x: number, y: number, radius: number, score: number}>;
     topKeywords: Array<{keyword: string, score: number}>;
-  } | null>(null); // 兴趣分析结果
+  } | null>(null); // Interest analysis result
 
-  // 调试用：当前指尖最近的 OCR 词
+  // Debug: nearest OCR word to the fingertip
   const [debugNearestWord, setDebugNearestWord] = useState<NearestWordInfo | null>(null);
 
-  // ===== 采样用 refs：保证定时器里永远读到最新值，而不依赖 effect 频繁重建 =====
+  // ===== Sampling refs: ensure timers always read latest values without frequent effect rebuilds =====
   const fingerTipPositionRef = useRef<{x: number; y: number} | null>(null);
   const ocrWordsInRegionRef = useRef<WordBBox[] | null>(null);
   const ocrRegionRef = useRef<{left: number; top: number; width: number; height: number} | null>(null);
@@ -265,7 +287,7 @@ export default function Home() {
     currentInterestScoreRef.current = currentInterestScore;
   }, [currentInterestScore]);
   
-  // 指读数据采样（约 10Hz）：记录指尖位置 + 最近 OCR 词框
+  // Pointing data sampling (~10Hz): record fingertip position + nearest OCR word
   useEffect(() => {
     if (!isLoggingEnabled) return;
 
@@ -322,7 +344,7 @@ export default function Home() {
           );
         }
 
-        // 每 10Hz 始终记录指尖样本，nearestWord 可能为 null
+        // Always record fingertip samples at 10Hz; nearestWord may be null
         const sample: PointerSampleInput = {
           timestamp: Date.now(),
           x: pointer.x,
@@ -337,7 +359,7 @@ export default function Home() {
         sessionLogger.addPointerSample(sample);
         setDebugNearestWord(nearest);
       } else {
-        // 没有指尖就暂时不记录
+        // No fingertip detected; skip logging
         setDebugNearestWord({ text: "-1", bbox: { x: 0, y: 0, w: 0, h: 0 }, distance: Infinity });
       }
 
@@ -352,12 +374,12 @@ export default function Home() {
     };
   }, [isLoggingEnabled]);
   
-  // 长按检测相关状态（只保留UI需要的字段）
+  // Long-press detection state (UI-only fields)
   const [longPressState, setLongPressState] = useState<{
     isActive: boolean;
     currentDuration: number;
     currentLevel: Level;
-    shouldTriggerOnMove: Level | false; // 标记应该触发的级别，false表示不触发
+    shouldTriggerOnMove: Level | false; // Indicates which level should trigger; false = no trigger
     startPosition: {x: number, y: number} | null;
   }>({
     isActive: false,
@@ -367,46 +389,47 @@ export default function Home() {
     startPosition: null
   });
   
-  // 手指检测配置参数
+  // Hand detection config
   const [handDetectionConfig, setHandDetectionConfig] = useState({
     minDetectionConfidence: 0.8,
     minTrackingConfidence: 0.8,
     modelComplexity: 1
   });
 
-  // 长按配置参数
+  // Long-press config
   const longPressConfig = {
-    positionTolerance: 15, // 位置容差（像素）
-    lightThreshold: 1800,   // light级别阈值（毫秒）
-    mediumThreshold: 3000, // medium级别阈值（毫秒）
-    hardThreshold: 5500,   // hard级别阈值（毫秒）
-    autoTriggerDelay: 1800  // 自动触发延迟（毫秒）
+    positionTolerance: 15, // Position tolerance (px)
+    lightThreshold: 1800,   // light threshold (ms)
+    mediumThreshold: 3000, // medium threshold (ms)
+    hardThreshold: 5500,   // hard threshold (ms)
+    autoTriggerDelay: 1800  // Auto-trigger delay (ms)
   };
 
-  // 手指模式：长按自动调用 LLM 的开关
+  // Finger mode: toggle long-press LLM
   const [isFingerLongPressLLMEnabled, setIsFingerLongPressLLMEnabled] = useState<boolean>(true);
-  // 同步 finger long-press LLM 开关到 ref，供 MediaPipe 回调使用
+  // Sync finger long-press LLM toggle to ref for MediaPipe callbacks
   useEffect(() => {
     isFingerLongPressLLMEnabledRef.current = isFingerLongPressLLMEnabled;
   }, [isFingerLongPressLLMEnabled]);
 
-  // 训练 topic 选择（用于 toast 展示）
+  // Training topic selection (for toast display)
   const [lastSelectedTopic, setLastSelectedTopic] = useState<string | null>(null);
+  const [downloadToast, setDownloadToast] = useState<string | null>(null);
 
-  // 兴趣度检测配置参数
+  // Interest detection config
   const interestDetectionConfig = {
-    trailMaxLength: 1000, // 轨迹最大长度
+    trailMaxLength: 1000, // Max trail length
     speedThreshold: {
-      slow: 0.5,    // 慢速阈值（像素/毫秒）
-      fast: 3.0     // 快速阈值（像素/毫秒）
+      slow: 0.5,    // Slow threshold (px/ms)
+      fast: 3.0     // Fast threshold (px/ms)
     },
-    stayTimeThreshold: 500, // 停留时间阈值（毫秒）
-    heatmapGridSize: 20,    // 热点图网格大小（像素）
-    interestDecayRate: 0.95, // 兴趣度衰减率
-    minInterestScore: 0.1   // 最小兴趣度分数
+    stayTimeThreshold: 500, // Dwell time threshold (ms)
+    heatmapGridSize: 20,    // Heatmap grid size (px)
+    interestDecayRate: 0.95, // Interest decay rate
+    minInterestScore: 0.1   // Minimum interest score
   };
 
-  // 兴趣度检测核心算法函数
+  // Core interest detection helpers
   const calculateSpeed = (point1: {x: number, y: number, timestamp: number}, point2: {x: number, y: number, timestamp: number}): number => {
     const distance = Math.hypot(point2.x - point1.x, point2.y - point1.y);
     const timeDiff = point2.timestamp - point1.timestamp;
@@ -420,7 +443,7 @@ export default function Home() {
     setMovementTrail(prevTrail => {
       let updatedTrail = [...prevTrail];
       
-      // 计算速度
+      // Compute speed
       if (updatedTrail.length > 0) {
         const lastPoint = updatedTrail[updatedTrail.length - 1];
         newPoint.speed = calculateSpeed(lastPoint, newPoint);
@@ -428,7 +451,7 @@ export default function Home() {
       
       updatedTrail.push(newPoint);
       
-      // 限制轨迹长度
+      // Limit trail length
       if (updatedTrail.length > interestDetectionConfig.trailMaxLength) {
         updatedTrail = updatedTrail.slice(-interestDetectionConfig.trailMaxLength);
       }
@@ -437,7 +460,7 @@ export default function Home() {
     });
   };
 
-  // rAF 采样：启用兴趣检测且存在指尖坐标时，以 ~60fps 更新轨迹
+  // rAF sampling: update trail at ~60fps when interest detection is enabled
   useEffect(() => {
     if (!isInterestDetectionEnabled) return;
     let rafId: number | null = null;
@@ -460,29 +483,29 @@ export default function Home() {
     let slowMovementCount = 0;
     let stayTimeCount = 0;
     
-    // 分析最近10个点的行为模式
+    // Analyze behavior of the last 10 points
     const recentPoints = trail.slice(-10);
     
     for (let i = 1; i < recentPoints.length; i++) {
       const point = recentPoints[i];
       const prevPoint = recentPoints[i - 1];
       
-      // 速度分析
+      // Speed analysis
       if (point.speed < interestDetectionConfig.speedThreshold.slow) {
         slowMovementCount++;
       }
       
-      // 停留时间分析
+      // Dwell time analysis
       const timeDiff = point.timestamp - prevPoint.timestamp;
       if (timeDiff > interestDetectionConfig.stayTimeThreshold) {
         stayTimeCount++;
       }
     }
     
-    // 计算兴趣度分数
+    // Compute interest score
     const speedScore = slowMovementCount / recentPoints.length; // 0-1
     const stayScore = stayTimeCount / recentPoints.length; // 0-1
-    const densityScore = Math.min(trail.length / 50, 1); // 轨迹密度分数
+    const densityScore = Math.min(trail.length / 50, 1); // Trail density score
     
     totalScore = (speedScore * 0.4 + stayScore * 0.4 + densityScore * 0.2) * 100;
     
@@ -512,22 +535,22 @@ export default function Home() {
 
   const extractKeywordsFromArea = async (x: number, y: number, radius: number = 50): Promise<string[]> => {
     try {
-      // 结合OCR结果提取关键词
+      // Extract keywords combined with OCR results
       if (answer && answer.length > 0) {
-        // 简单的关键词提取逻辑
+        // Simple keyword extraction logic
         const words = answer.split(/[\s\n,，。！？；：]/).filter(word => 
           word.length > 1 && 
           !['的', '了', '在', '是', '有', '和', '与', '或', '但', '而', '这', '那', '个', '一', '二', '三', '四', '五'].includes(word)
         );
         
-        // 返回前5个最长的词作为关键词
+        // Return the top 5 longest words as keywords
         return words
           .sort((a, b) => b.length - a.length)
           .slice(0, 5)
           .map(word => word.trim());
       }
       
-      // 如果没有OCR结果，返回模拟关键词
+      // If no OCR results, return mock keywords
       const keywords = ['技术', '创新', '人工智能', '用户体验', '设计', '算法', '数据', '分析', '系统', '应用'];
       return keywords.slice(0, Math.floor(Math.random() * 3) + 1);
     } catch (error) {
@@ -542,12 +565,12 @@ export default function Home() {
     const totalScore = calculateInterestScore(movementTrail);
     const averageSpeed = movementTrail.reduce((sum, point) => sum + point.speed, 0) / movementTrail.length;
     
-    // 识别焦点区域
+    // Identify focus areas
     const focusAreas: Array<{x: number, y: number, radius: number, score: number}> = [];
     const heatmapEntries = Array.from(interestHeatmap.entries());
     
     for (const [key, score] of heatmapEntries) {
-      if (score > 20) { // 只显示高分区域
+      if (score > 20) { // Only show high-score areas
         const [gridX, gridY] = key.split(',').map(Number);
         const x = gridX * interestDetectionConfig.heatmapGridSize;
         const y = gridY * interestDetectionConfig.heatmapGridSize;
@@ -555,11 +578,11 @@ export default function Home() {
       }
     }
     
-    // 提取关键词
+    // Extract keywords
     const keywords = await extractKeywordsFromArea(0, 0, 100);
     const topKeywords = keywords.map(keyword => ({
       keyword,
-      score: Math.random() * 50 + 20 // 模拟分数
+      score: Math.random() * 50 + 20 // Simulated score
     }));
     
     setInterestAnalysis({
@@ -570,7 +593,7 @@ export default function Home() {
     });
   };
 
-  // 稳定的实时速度（最近8点的总位移/总时间，px/s）
+  // Stable realtime speed (total distance/time of last 8 points, px/s)
   const stableRealtimeSpeedPxPerSec = useMemo(() => {
     const n = movementTrail.length;
     if (n < 3) return 0;
@@ -586,7 +609,7 @@ export default function Home() {
     return (totalDist / totalTime) * 1000; // px/s
   }, [movementTrail]);
 
-  // 检测设备信息
+  // Detect device info
   useEffect(() => {
     const ua = navigator.userAgent;
     const isIOS = /iPad|iPhone|iPod/.test(ua);
@@ -598,7 +621,7 @@ export default function Home() {
     console.log('[Device]', info);
   }, []);
 
-  // 添加移动端调试工具
+  // Add mobile debugging tool
   useEffect(() => {
     const script = document.createElement('script');
     script.src = 'https://cdn.jsdelivr.net/npm/eruda@3/eruda.js';
@@ -622,7 +645,7 @@ export default function Home() {
             width: { ideal: 19200, min: 1280 },
             height: { ideal: 10800, min: 720 },
             frameRate: { ideal: 30, min: 15 },
-            // 添加更多约束以获得更好的画质
+            // Add more constraints for better quality
              aspectRatio: { ideal: 1 }
           }, 
           audio: false,
@@ -635,13 +658,13 @@ export default function Home() {
           try {
             await v.play();
             
-            // 尝试设置自动对焦
+            // Try to enable autofocus
             try {
               const videoTrack = stream.getVideoTracks()[0];
               const capabilities = videoTrack.getCapabilities() as any;
               console.log('[Camera] 摄像头能力:', capabilities);
               
-              // 如果支持对焦，设置为连续自动对焦
+              // If focus is supported, enable continuous autofocus
               if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
                 await videoTrack.applyConstraints({
                   advanced: [{ focusMode: 'continuous' } as any]
@@ -655,9 +678,9 @@ export default function Home() {
               } else {
                 console.log('[Camera] ⚠️ 设备不支持自动对焦控制，尝试手动对焦...');
                 
-                // 如果支持手动对焦距离设置
+                // If manual focus distance is supported
                 if (capabilities.focusDistance) {
-                  // 设置一个中等对焦距离（通常对文档阅读比较好）
+                  // Set a mid focus distance (often good for reading documents)
                   const midDistance = (capabilities.focusDistance.min + capabilities.focusDistance.max) / 2;
                   await videoTrack.applyConstraints({
                     advanced: [{ focusDistance: midDistance } as any]
@@ -668,7 +691,7 @@ export default function Home() {
                 }
               }
               
-              // 如果支持白平衡，设置为自动
+              // If white balance is supported, set to auto
               if (capabilities.whiteBalanceMode && capabilities.whiteBalanceMode.includes('continuous')) {
                 await videoTrack.applyConstraints({
                   advanced: [{ whiteBalanceMode: 'continuous' } as any]
@@ -676,7 +699,7 @@ export default function Home() {
                 console.log('[Camera] ✅ 已启用自动白平衡');
               }
               
-              // 如果支持曝光，设置为自动
+              // If exposure is supported, set to auto
               if (capabilities.exposureMode && capabilities.exposureMode.includes('continuous')) {
                 await videoTrack.applyConstraints({
                   advanced: [{ exposureMode: 'continuous' } as any]
@@ -690,7 +713,7 @@ export default function Home() {
             
             setVideoReady(true);
             
-            // 延迟初始化Three.js渲染器，确保视频已开始播放
+            // Delay Three.js init to ensure video playback started
             setTimeout(() => {
               initThreeRenderer();
             }, 300);
@@ -704,50 +727,50 @@ export default function Home() {
     })();
   }, []);
   
-  // 初始化Three.js渲染器（用于实时显示3D效果）
+  // Initialize Three.js renderer (for realtime 3D)
   const initThreeRenderer = () => {
     const video = videoRef.current;
     const canvas = threeCanvasRef.current;
     
     if (!video || !canvas || video.videoWidth === 0) {
-      console.warn('[Three.js Init] 视频未准备好，延迟初始化');
+      console.warn('[Three.js Init] Video not ready, delaying init');
       setTimeout(initThreeRenderer, 500);
       return;
     }
     
-    console.log('[Three.js Init] 开始初始化Three.js实时渲染器');
+    console.log('[Three.js Init] Starting Three.js realtime renderer init');
     
     const containerWidth = 1000;
     const containerHeight = 1000;
     
-    // 创建渲染器
+    // Create renderer
     const renderer = new THREE.WebGLRenderer({ 
       canvas,
       antialias: true,
       alpha: false
     });
-    // 处理高DPR设备，保证渲染内容与CSS像素对齐
+    // Handle high-DPR devices to match CSS pixels
     renderer.setPixelRatio(Math.max(1, window.devicePixelRatio || 1));
     renderer.setSize(containerWidth, containerHeight, false);
     renderer.setClearColor(0x000000, 1);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     threeRendererRef.current = renderer;
     
-    // 创建场景
+    // Create scene
     const scene = new THREE.Scene();
     threeSceneRef.current = scene;
     
-    // 创建相机（Perspective，匹配CSS perspective(800px)）
-    const fov = 2 * Math.atan(containerHeight / (2 * 800)) * 180 / Math.PI; // 根据perspective(800px)推导FOV
+    // Create camera (Perspective, matches CSS perspective(800px))
+    const fov = 2 * Math.atan(containerHeight / (2 * 800)) * 180 / Math.PI; // FOV derived from perspective(800px)
     const aspect = containerWidth / containerHeight;
     const near = 0.1;
     const far = 5000;
     const camera = new THREE.PerspectiveCamera(fov, aspect, near, far);
-    camera.position.set(0, 0, 800); // 相机Z=perspective距离
+    camera.position.set(0, 0, 800); // Camera Z = perspective distance
     camera.lookAt(0, 0, 0);
     threeCameraRef.current = camera;
     
-    // 创建视频纹理
+    // Create video texture
     const videoTexture = new THREE.VideoTexture(video);
     videoTexture.minFilter = THREE.LinearFilter;
     videoTexture.magFilter = THREE.LinearFilter;
@@ -755,7 +778,7 @@ export default function Home() {
     videoTexture.colorSpace = THREE.SRGBColorSpace;
     threeTextureRef.current = videoTexture;
     
-    // 计算视频平面尺寸
+    // Compute video plane size
     const videoAspect = video.videoWidth / video.videoHeight;
     const containerAspect = containerWidth / containerHeight;
     
@@ -768,12 +791,12 @@ export default function Home() {
       planeWidth = containerHeight * videoAspect;
     }
     
-    // 创建平面（放入pivot使其围绕顶部旋转）
+    // Create plane (put under pivot to rotate around top)
     const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
-    // 自定义着色器材质：在rotateX之后对Y做非线性补偿，减轻行距压缩
+    // Custom shader material: non-linear Y compensation after rotateX to reduce line compression
     const uniforms = {
       u_map: { value: videoTexture as THREE.Texture },
-      u_comp: { value: warpCompensation }, // 0~0.5 建议
+      u_comp: { value: warpCompensation }, // Suggested 0~0.5
     };
     shaderUniformsRef.current = uniforms as any;
     const material = new THREE.ShaderMaterial({
@@ -788,13 +811,13 @@ export default function Home() {
       fragmentShader: `
         precision mediump float;
         uniform sampler2D u_map;
-        uniform float u_comp; // 0关闭，越大补偿越强
+        uniform float u_comp; // 0 disables, higher = stronger compensation
         varying vec2 v_uv;
         void main() {
-          // y越靠近下方，压缩越明显；做反向拉伸补偿：scaleY = 1.0 / mix(1.0, 1.0 + u_comp, v_uv.y)
+          // Lower y compresses more; apply inverse stretch compensation
           float scale = 1.0 / mix(1.0, 1.0 + u_comp, 1.0-v_uv.y);
           float cy = 0.5;
-          float y = (v_uv.y - cy) * scale + cy; // 围绕中心做非线性拉伸
+          float y = (v_uv.y - cy) * scale + cy; // Non-linear stretch around center
           vec2 uv2 = vec2(v_uv.x, clamp(y, 0.0, 1.0));
           gl_FragColor = texture2D(u_map, uv2);
         }
@@ -803,42 +826,42 @@ export default function Home() {
       side: THREE.DoubleSide,
     });
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.set(0, -planeHeight / 2, 0); // 将平面下移半个高度，使pivot在顶部
+    mesh.position.set(0, -planeHeight / 2, 0); // Shift plane down so pivot is at top
     threeMeshRef.current = mesh;
-    mesh.scale.x *= -1; // 水平镜像
+    mesh.scale.x *= -1; // Mirror horizontally
     const pivot = new THREE.Object3D();
-    pivot.position.set(0, planeHeight / 2, 0); // 顶部作为轴心
+    pivot.position.set(0, planeHeight / 2, 0); // Top as pivot
     pivot.add(mesh);
     scene.add(pivot);
     threePivotRef.current = pivot;
     threePivotBaseYRef.current = pivot.position.y;
-    // 应用初始变换（避免需要用户交互才更新）
+    // Apply initial transform (avoid needing user interaction)
     try {
-      // 平移
+      // Translation
       pivot.position.x = videoTranslate.x;
       pivot.position.y = threePivotBaseYRef.current - videoTranslate.y;
-      // 缩放（保持水平镜像）
+      // Scale (keep horizontal mirror)
       mesh.scale.set(videoScale, videoScale, 1);
       mesh.scale.x *= -1;
-      // 透视旋转
+      // Perspective rotation
       const rotationAngle = -(perspectiveStrength / 100) * (Math.PI / 6);
       pivot.rotation.x = rotationAngle;
-      // 相机位置（匹配 CSS perspective(800px)）
+      // Camera position (match CSS perspective(800px))
       camera.position.set(0, 0, 800);
       camera.lookAt(0, 0, 0);
-      // 补偿强度
+      // Compensation strength
       if (shaderUniformsRef.current) {
         shaderUniformsRef.current.u_comp.value = warpCompensation;
       }
     } catch {}
     
-    console.log('[Three.js Init] Three.js渲染器初始化完成，平面尺寸:', planeWidth, 'x', planeHeight);
+    console.log('[Three.js Init] Three.js renderer initialized, plane size:', planeWidth, 'x', planeHeight);
     
-    // 开始动画循环
+    // Start animation loop
     startThreeAnimation();
   };
   
-  // Three.js动画循环
+  // Three.js animation loop
   const startThreeAnimation = () => {
     const animate = () => {
       animationFrameRef.current = requestAnimationFrame(animate);
@@ -851,7 +874,7 @@ export default function Home() {
       
       if (!renderer || !scene || !camera || !mesh) return;
       
-      // 更新视频纹理
+      // Update video texture
       if (texture) {
         texture.needsUpdate = true;
       }
@@ -861,26 +884,25 @@ export default function Home() {
     animate();
   };
 
-  // ===== Warp 补偿：严格按 shader 公式重建，并在「以顶部为 0」的坐标系里求反函数 =====
-  // shader 里的代码（注意 v_uv.y 的坐标系是以底部为 0，顶部为 1）：
+  // ===== Warp compensation: rebuild per shader formula and invert in top-based coordinates =====
+  // Shader code (note v_uv.y uses bottom=0, top=1):
   //   float scale = 1.0 / mix(1.0, 1.0 + u_comp, 1.0 - v_uv.y);
   //   float cy = 0.5;
   //   float y  = (v_uv.y - cy) * scale + cy;
   //   vec2 uv2 = vec2(v_uv.x, clamp(y, 0.0, 1.0));
   //
-  // MediaPipe 的 v 是「顶部为 0，底部为 1」的坐标，所以这里先把它转换到同一个 top-based 坐标系下推导：
+  // MediaPipe v uses top=0, bottom=1, so convert to the same top-based space:
   //
-  //   设 y_t = 1.0 - v_uv.y  （top-based：0=top,1=bottom）
+  //   Let y_t = 1.0 - v_uv.y (top-based: 0=top, 1=bottom)
   //       y2_t = 1.0 - uv2_y
   //
-  // 可以推导出 top-based 坐标下的前向 warp：
+  // Forward warp in top-based coordinates:
   //   y2_t = 0.5 - (0.5 - y_t) / (1.0 + c * y_t)    （c = u_comp）
   //
-  // 这里我们实现：
-  //   1) applyWarpTop(y_t, c)   : y_t -> y2_t   （严格等价于 shader 的 warp）
-  //   2) invertVerticalWarp(v, c): 已知「原始视频坐标」v（= y2_t，0=top,1=bottom），
-  //                                通过数值二分求出对应的几何参数 y_t，
-  //                                再用它作为平面的 v 参与 3D 透视投影。
+  // We implement:
+  //   1) applyWarpTop(y_t, c): y_t -> y2_t (exactly matches shader warp)
+  //   2) invertVerticalWarp(v, c): given original video coord v (= y2_t, 0=top,1=bottom),
+  //      solve y_t via binary search and use it as plane v for 3D projection.
   const applyWarpTop = (vTop: number, comp: number): number => {
     if (comp <= 0) return vTop;
     const denom = 1 + comp * vTop;
@@ -891,7 +913,7 @@ export default function Home() {
 
   const invertVerticalWarp = (vSample: number, comp: number): number => {
     if (comp <= 0) return vSample;
-    // 简单的单调二分：在 [0,1] 上寻找 applyWarpTop(v, comp) ≈ vSample
+    // Simple monotonic binary search on [0,1] to solve applyWarpTop(v, comp) ≈ vSample
     let low = 0;
     let high = 1;
     let mid = vSample;
@@ -908,36 +930,36 @@ export default function Home() {
     return Math.min(1, Math.max(0, vPlane));
   };
 
-  // 将 MediaPipe 归一化视频坐标 (u,v in [0,1]) 映射到叠加层屏幕坐标
+  // Map MediaPipe normalized video coords (u,v in [0,1]) to overlay screen coords
   const projectVideoUVToOverlay = (u: number, v: number): {x: number; y: number} | null => {
     const renderer = threeRendererRef.current;
     const camera = threeCameraRef.current;
     const mesh = threeMeshRef.current;
     if (!renderer || !camera || !mesh) return null;
 
-    // 每次调用时取 ref 里的最新补偿值，避免 MediaPipe 回调持有旧的闭包值
+    // Read latest compensation from ref to avoid stale MediaPipe closures
     const comp = warpCompensationRef.current;
 
-    // 注意：MediaPipe 给的是“原始视频坐标”（对应 shader 里的 uv2.y），
-    // 但 three.js 平面几何用的是 v_uv.y 作为参数坐标。
-    // 我们要找到这样的 v_uv.y，使得 warp(v_uv.y) ≈ v（也就是这行像素最终出现在平面上的高度），
-    // 所以这里使用反函数把 v 映射回几何参数坐标。
+    // Note: MediaPipe gives "original video coords" (shader uv2.y),
+    // while the Three.js plane uses v_uv.y as its param.
+    // We need v_uv.y such that warp(v_uv.y) ≈ v (final line position),
+    // so we invert the warp to map v back to plane param coords.
     const vPlane = invertVerticalWarp(v, comp);
 
-    // 取平面尺寸
+    // Get plane size
     const geom = mesh.geometry as THREE.PlaneGeometry;
     const planeWidth = geom.parameters.width as number;
     const planeHeight = geom.parameters.height as number;
-    // 视频UV → mesh局部坐标（mesh 局部原点在视频中心，+X右，+Y上）
+    // Video UV → mesh local coords (origin at video center, +X right, +Y up)
     const localX = (u - 0.5) * planeWidth;
-    // const localY = (0.5 - v) * planeHeight; // v向下 → Three 向上（旧版本）
-    const localY = (0.5 - vPlane) * planeHeight; // v向下 → Three 向上（用反warp后的 vPlane）
+    // const localY = (0.5 - v) * planeHeight; // v down → Three up (old)
+    const localY = (0.5 - vPlane) * planeHeight; // v down → Three up (using inverted vPlane)
     const local = new THREE.Vector3(localX, localY, 0);
-    // 转世界坐标
+    // To world coordinates
     const world = local.clone().applyMatrix4(mesh.matrixWorld);
-    // 投影到NDC
+    // Project to NDC
     const ndc = world.clone().project(camera);
-    // NDC → 屏幕像素（使用渲染canvas的CSS大小）
+    // NDC → screen pixels (using renderer canvas CSS size)
     const cssW = renderer.domElement.clientWidth || 500;
     const cssH = renderer.domElement.clientHeight || 500;
     const x = (ndc.x * 0.5 + 0.5) * cssW;
@@ -945,13 +967,13 @@ export default function Home() {
     return { x, y };
   };
 
-  // 工具：从Three渲染canvas按选择区域进行WYSIWYG裁剪（考虑DPR）
+  // Helper: WYSIWYG crop from Three.js canvas by region (with DPR)
   const captureWYSIWYGRegion = (region: {left: number; top: number; width: number; height: number}) => {
     const renderer = threeRendererRef.current;
     const scene = threeSceneRef.current;
     const camera = threeCameraRef.current;
     if (!renderer || !scene || !camera) return null;
-    // 强制渲染一帧以确保内容最新
+    // Force a render to ensure content is current
     renderer.render(scene, camera);
     const source = renderer.domElement;
     const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -968,7 +990,7 @@ export default function Home() {
     return out;
   };
 
-  // 高分辨率WYSIWYG裁剪：使用离屏renderer按scale渲染后再裁剪
+  // High-res WYSIWYG crop: render offscreen at scale then crop
   const captureWYSIWYGRegionHiRes = (region: {left: number; top: number; width: number; height: number}, scale: number = 2) => {
     const baseRenderer = threeRendererRef.current;
     const scene = threeSceneRef.current;
@@ -977,7 +999,7 @@ export default function Home() {
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const cssW = baseRenderer.domElement.clientWidth || 500;
     const cssH = baseRenderer.domElement.clientHeight || 500;
-    // 复用离屏renderer
+    // Reuse offscreen renderer
     let off = offscreenRendererRef.current;
     if (!off) {
       off = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
@@ -993,7 +1015,7 @@ export default function Home() {
     const sw = Math.floor(region.width * dpr * scale);
     const sh = Math.floor(region.height * dpr * scale);
     if (sw <= 0 || sh <= 0) { return null; }
-    // 复用裁剪canvas
+    // Reuse crop canvas
     let out = captureCanvasRef.current;
     if (!out) {
       out = document.createElement('canvas');
@@ -1006,7 +1028,7 @@ export default function Home() {
     return out;
   };
   
-  // 监听变换参数变化，实时更新Three.js场景（使用pivot模拟CSS transform-origin: top）
+  // Watch transform params and update Three.js scene (pivot simulates CSS transform-origin: top)
   useEffect(() => {
     const mesh = threeMeshRef.current;
     const pivot = threePivotRef.current;
@@ -1014,26 +1036,26 @@ export default function Home() {
     
     if (!mesh || !pivot || !camera) return;
     
-    // 顺序匹配CSS: transform-origin: top → translate → scale/flip → rotateX
-    // 1) 平移（以pivot为参考系，保持顶部轴心基准）
+    // Match CSS order: transform-origin: top → translate → scale/flip → rotateX
+    // 1) Translate (relative to pivot, keep top pivot baseline)
     pivot.position.x = videoTranslate.x;
     pivot.position.y = threePivotBaseYRef.current - videoTranslate.y;
-    // 在更新变换的 effect 里（与 pivot.position.y 同处）
+    // In the transform update effect (same as pivot.position.y)
 
 
     
-    // 2) 缩放
+    // 2) Scale
     mesh.scale.set(videoScale, videoScale, 1);
-    mesh.scale.x *= -1; // 水平镜像
+    mesh.scale.x *= -1; // Horizontal mirror
     
-    // 3) 透视旋转：绕X轴负角度（下边变大）
-    const rotationAngle = -(perspectiveStrength / 100) * (Math.PI / 6); // 0到-20度
+    // 3) Perspective rotation: negative X rotation (bottom grows)
+    const rotationAngle = -(perspectiveStrength / 100) * (Math.PI / 6); // 0 to -20 degrees
     pivot.rotation.x = rotationAngle;
     
-    // 4) 相机匹配CSS perspective(800px)
+    // 4) Camera matches CSS perspective(800px)
     camera.position.set(0, 0, 800);
     camera.lookAt(0, 0, 0);
-    // 更新补偿强度
+    // Update compensation strength
     if (shaderUniformsRef.current) {
       shaderUniformsRef.current.u_comp.value = warpCompensation;
     }
@@ -1047,7 +1069,7 @@ export default function Home() {
       try {
         console.log('[OCR] start initializing Tesseract.js...');
         
-        // v5+ 的正确用法：直接传语言代码，不需要额外配置
+        // v5+ usage: pass language code directly, no extra config
         const w = await createWorker('eng', 1, {
           logger: (m: any) => console.log('[tesseract]', m),
         });
@@ -1078,10 +1100,10 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 3) MediaPipe Hands 实例创建/销毁（只依赖启用状态）
+  // 3) Create/destroy MediaPipe Hands instance (depends only on enabled state)
   useEffect(() => {
     if (!isHandDetectionEnabled) {
-      // 清理现有实例
+      // Clean up existing instance
       if (handsInstance) {
         handsInstance.close();
         setHandsInstance(null);
@@ -1095,11 +1117,11 @@ export default function Home() {
     
     const initializeHandDetection = async () => {
       try {
-        console.log('[HandDetection] 开始初始化 MediaPipe Hands...');
+        console.log('[HandDetection] Starting MediaPipe Hands init...');
         
-        // 使用CDN方式加载MediaPipe Hands
+        // Load MediaPipe Hands via CDN
         if (!(window as any).Hands) {
-          // 动态加载MediaPipe脚本
+          // Dynamically load MediaPipe script
           const script = document.createElement('script');
           script.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js';
           
@@ -1109,7 +1131,7 @@ export default function Home() {
             document.head.appendChild(script);
           });
           
-          console.log('[HandDetection] MediaPipe脚本加载完成');
+          console.log('[HandDetection] MediaPipe script loaded');
         }
         
         if (!mounted) return;
@@ -1121,12 +1143,12 @@ export default function Home() {
         });
         
         hands.setOptions({
-          maxNumHands: 1, // 只检测一只手
-          modelComplexity: handDetectionConfig.modelComplexity, // 使用配置的模型复杂度
-          minDetectionConfidence: handDetectionConfig.minDetectionConfidence, // 使用配置的检测置信度
-          minTrackingConfidence: handDetectionConfig.minTrackingConfidence,  // 使用配置的跟踪置信度
-          selfieMode: false, // 不使用自拍模式（避免额外的镜像处理）
-          staticImageMode: false // 使用视频模式而非静态图像模式
+          maxNumHands: 1, // Detect only one hand
+          modelComplexity: handDetectionConfig.modelComplexity, // Use configured model complexity
+          minDetectionConfidence: handDetectionConfig.minDetectionConfidence, // Use configured detection confidence
+          minTrackingConfidence: handDetectionConfig.minTrackingConfidence,  // Use configured tracking confidence
+          selfieMode: false, // Disable selfie mode (avoid extra mirroring)
+          staticImageMode: false // Use video mode, not static image mode
         });
         
         hands.onResults((results: any) => {
@@ -1136,63 +1158,63 @@ export default function Home() {
           
           if (results.multiHandLandmarks && results.multiHandLandmarks[0]) {
             const landmarks = results.multiHandLandmarks[0];
-            // 获取食指指尖坐标 (landmark 8)
+            // Get index fingertip coords (landmark 8)
             const fingerTip = landmarks[8];
             
-            // 转换为像素坐标（考虑视频实际显示区域）
+            // Convert to pixel coords (account for actual display area)
             const videoContainer = document.querySelector('.video-container') as HTMLElement;
             const video = videoRef.current;
             if (videoContainer && video) {
               const containerRect = videoContainer.getBoundingClientRect();
               
-              // 关键：计算视频在容器中的实际显示区域
+              // Key: compute actual video display region in container
               const videoAspect = video.videoWidth / video.videoHeight;
               const containerAspect = containerRect.width / containerRect.height;
               
               let videoDisplayWidth, videoDisplayHeight, videoOffsetX, videoOffsetY;
               
               if (videoAspect > containerAspect) {
-                // 视频更宽，以容器宽度为准
+                // Video is wider; use container width
                 videoDisplayWidth = containerRect.width;
                 videoDisplayHeight = containerRect.width / videoAspect;
                 videoOffsetX = 0;
                 videoOffsetY = (containerRect.height - videoDisplayHeight) / 2;
               } else {
-                // 视频更高，以容器高度为准
+                // Video is taller; use container height
                 videoDisplayHeight = containerRect.height;
                 videoDisplayWidth = containerRect.height * videoAspect;
                 videoOffsetX = (containerRect.width - videoDisplayWidth) / 2;
                 videoOffsetY = 0;
               }
               
-              // 使用Three.js投影，获得在overlay上的像素坐标
+              // Use Three.js projection to get overlay pixel coords
               const projected = projectVideoUVToOverlay(fingerTip.x, fingerTip.y);
               if (!projected) return;
               let { x, y } = projected;
 
-              // 指尖下部视觉补偿：
-              // - MediaPipe 的 fingerTip.y 是 0~1（0=顶部，1=底部）
-              // - 实际观察中，越靠下手指会被透视/warp 拉长，看起来 marker 落在指甲中间
-              // 这里在屏幕坐标上做一个随 y 增大的向下偏移，只作用于 fingerTipPosition，
-              // 不影响视频本身和截图区域。
-              const fingerCompStrength = 0.05; // 可调：0.03~0.08 之间根据实际感觉微调
+              // Visual compensation for lower fingertip:
+              // - MediaPipe fingerTip.y is 0~1 (0=top, 1=bottom)
+              // - Lower positions look stretched by perspective/warp; marker appears mid-nail
+              // Apply a downward offset that grows with y, only for fingerTipPosition
+              // (does not affect video or capture region).
+              const fingerCompStrength = 0.05; // Tunable: 0.03~0.08
               const extraY = fingerCompStrength * (-fingerTip.y) * containerRect.height;
               y += extraY;
 
-              // === 指尖坐标滤波：低通 + 小抖动死区 ===
-              // rawPos：几何 + 视觉补偿后的原始像素坐标
-              const rawPos = { x: x - 5, y }; // 5px 水平补偿，让小圆点更贴近指尖边缘
+              // === Fingertip smoothing: low-pass + small jitter dead zone ===
+              // rawPos: pixel coords after geometry + visual compensation
+              const rawPos = { x: x - 5, y }; // 5px horizontal shift to align marker to edge
               let smoothedPos = rawPos;
               const prev = fingerTipPositionRef.current;
               if (prev) {
                 const dx = rawPos.x - prev.x;
                 const dy = rawPos.y - prev.y;
                 const dist = Math.hypot(dx, dy);
-                const deadZonePx = 2; // 2px 以内视为手抖，直接锁定在上一帧
+                const deadZonePx = 2; // <=2px treated as jitter; lock to previous frame
                 if (dist < deadZonePx) {
                   smoothedPos = prev;
                 } else {
-                  const alpha = 0.5; // 0~1：越小越平滑但“跟手”会略差
+                  const alpha = 0.5; // 0~1: smaller is smoother but less responsive
                   smoothedPos = {
                     x: prev.x + alpha * dx,
                     y: prev.y + alpha * dy,
@@ -1202,27 +1224,27 @@ export default function Home() {
 
               setFingerTipPosition(smoothedPos);
               
-              // 兴趣度检测：使用平滑后的坐标更新移动轨迹
+              // Interest detection: update movement trail with smoothed coords
               if (isInterestDetectionEnabled) {
                 updateMovementTrail(smoothedPos.x, smoothedPos.y);
                 
-                // 计算当前兴趣度分数
+                // Compute current interest score
                 const currentScore = calculateInterestScore(movementTrail);
                 setCurrentInterestScore(currentScore);
                 
-                // 更新兴趣热点图
+                // Update interest heatmap
                 if (currentScore > 10) {
                   updateInterestHeatmap(x, y, currentScore);
                 }
               }
               
-              // 长按检测逻辑（使用ref减少setState）
+              // Long-press detection logic (use refs to reduce setState)
               if (isFingerLongPressLLMEnabledRef.current) {
                 const currentTime = Date.now();
                 //const newPosition = { x, y };
                 const newPosition = smoothedPos;
                 
-                // 检查是否在同一位置（容差范围内）
+                // Check if still in the same position (within tolerance)
                 if (longPressRef.current.startPosition) {
                   const distance = Math.sqrt(
                     Math.pow(newPosition.x - longPressRef.current.startPosition.x, 2) + 
@@ -1230,7 +1252,7 @@ export default function Home() {
                   );
                   
                   if (distance <= longPressConfig.positionTolerance) {
-                    // 在同一位置，更新持续时间
+                    // Same position; update duration
                     const duration = currentTime - longPressRef.current.startTime;
                     let currentLevel: Level = 'light';
                     
@@ -1242,19 +1264,19 @@ export default function Home() {
                       currentLevel = 'light';
                     }
                     
-                    // 更新ref
+                    // Update ref
                     longPressRef.current.currentLevel = currentLevel;
                     
-                    // 到达light级别时截屏（只截一次）
+                    // Take screenshot at light level (once)
                     if (duration >= longPressConfig.lightThreshold && !longPressRef.current.hasScreenshot) {
                       takeFingerScreenshot(newPosition);
                     }
                     
-                    // 只在UI需要更新时setState（减少频率）
+                    // Only setState when UI needs update (reduce frequency)
                     const isActive = duration >= longPressConfig.autoTriggerDelay;
                     if (longPressState.isActive !== isActive || 
                         longPressState.currentLevel !== currentLevel ||
-                        Math.abs(longPressState.currentDuration - duration) > 100) { // 100ms更新一次UI
+                        Math.abs(longPressState.currentDuration - duration) > 100) { // Update UI every 100ms
                       setLongPressState(prev => ({
                         ...prev,
                         isActive,
@@ -1265,11 +1287,11 @@ export default function Home() {
                       }));
                     }
                   } else {
-                    // 位置变化太大，标记需要触发OCR
+                    // Position change too large; mark for OCR trigger
                     const shouldTrigger = !longPressRef.current.hasTriggered && 
                                          (currentTime - longPressRef.current.startTime) >= longPressConfig.autoTriggerDelay;
                     
-                    // 重置ref
+                    // Reset ref
                     longPressRef.current = {
                       startTime: currentTime,
                       startPosition: newPosition,
@@ -1278,7 +1300,7 @@ export default function Home() {
                       hasScreenshot: false
                     };
                     
-                    // 更新state
+                    // Update state
                     const triggerLevel = shouldTrigger ? longPressRef.current.currentLevel : false;
                     setLongPressState({
                       isActive: false,
@@ -1289,7 +1311,7 @@ export default function Home() {
                     });
                   }
                 } else {
-                  // 首次检测到手指位置
+                  // First time fingertip detected
                   longPressRef.current = {
                     startTime: currentTime,
                     startPosition: newPosition,
@@ -1308,23 +1330,23 @@ export default function Home() {
                 }
               }
               
-              // console.log('[HandDetection] 检测到指尖位置 (含宽高比修正):', { 
-              //   原始MediaPipe: { x: fingerTip.x.toFixed(3), y: fingerTip.y.toFixed(3) },
-              //   视频尺寸: { w: video.videoWidth, h: video.videoHeight, aspect: videoAspect.toFixed(2) },
-              //   容器尺寸: { w: containerRect.width, h: containerRect.height, aspect: containerAspect.toFixed(2) },
-              //   实际显示区域: { w: videoDisplayWidth.toFixed(1), h: videoDisplayHeight.toFixed(1), offsetX: videoOffsetX.toFixed(1), offsetY: videoOffsetY.toFixed(1) },
-              //   最终坐标: { x: x.toFixed(1), y: y.toFixed(1) },
-              //   当前变换: { scale: videoScale.toFixed(2), translateX: videoTranslate.x.toFixed(1), translateY: videoTranslate.y.toFixed(1) }
+              // console.log('[HandDetection] Fingertip position (with aspect correction):', { 
+              //   rawMediaPipe: { x: fingerTip.x.toFixed(3), y: fingerTip.y.toFixed(3) },
+              //   videoSize: { w: video.videoWidth, h: video.videoHeight, aspect: videoAspect.toFixed(2) },
+              //   containerSize: { w: containerRect.width, h: containerRect.height, aspect: containerAspect.toFixed(2) },
+              //   displayArea: { w: videoDisplayWidth.toFixed(1), h: videoDisplayHeight.toFixed(1), offsetX: videoOffsetX.toFixed(1), offsetY: videoOffsetY.toFixed(1) },
+              //   finalCoord: { x: x.toFixed(1), y: y.toFixed(1) },
+              //   transforms: { scale: videoScale.toFixed(2), translateX: videoTranslate.x.toFixed(1), translateY: videoTranslate.y.toFixed(1) }
               // });
             }
           } else {
             setFingerTipPosition(null);
-            // 手指消失时重置长按状态
+            // Reset long-press state when finger disappears
             const shouldTrigger = !longPressRef.current.hasTriggered && 
                                  longPressRef.current.startPosition &&
                                  (Date.now() - longPressRef.current.startTime) >= longPressConfig.autoTriggerDelay;
             
-            // 重置ref
+            // Reset ref
             const triggerLevel = shouldTrigger ? longPressRef.current.currentLevel : false;
             longPressRef.current = {
               startTime: 0,
@@ -1334,7 +1356,7 @@ export default function Home() {
               hasScreenshot: false
             };
             
-            // 更新state
+            // Update state
             setLongPressState({
               isActive: false,
               currentDuration: 0,
@@ -1348,17 +1370,17 @@ export default function Home() {
         if (!mounted) return;
         
         setHandsInstance(hands);
-        console.log('[HandDetection] ✅ MediaPipe Hands 初始化完成');
+        console.log('[HandDetection] ✅ MediaPipe Hands initialized');
         
-        // 开始处理视频帧（优化帧率控制）
+        // Start processing video frames (optimize frame rate)
         let lastFrameTime = 0;
-        const targetFPS = 30; // 目标帧率
+        const targetFPS = 30; // Target FPS
         const frameInterval = 1000 / targetFPS;
         
         const processFrame = async (currentTime: number = 0) => {
           const video = videoRef.current;
           
-          // 控制帧率，避免过度处理
+          // Throttle frame rate to avoid over-processing
           if (currentTime - lastFrameTime >= frameInterval) {
             if (video && video.readyState >= 2 && mounted && isHandDetectionEnabled) {
               try {
@@ -1391,16 +1413,16 @@ export default function Home() {
         try {
           handsInstance.close();
         } catch (error) {
-          console.warn('[HandDetection] 清理实例时出错:', error);
+        console.warn('[HandDetection] Error while cleaning instance:', error);
         }
       }
     };
-  }, [isHandDetectionEnabled]); // 只依赖启用状态
+  }, [isHandDetectionEnabled]); // Only depend on enabled state
 
-  // 4) MediaPipe Hands 配置更新（不重建实例）
+  // 4) MediaPipe Hands config updates (no instance rebuild)
   useEffect(() => {
     if (handsInstance && isHandDetectionEnabled) {
-      console.log('[HandDetection] 更新配置:', handDetectionConfig);
+      console.log('[HandDetection] Updating config:', handDetectionConfig);
       handsInstance.setOptions({
         maxNumHands: 1,
         modelComplexity: handDetectionConfig.modelComplexity,
@@ -1412,7 +1434,7 @@ export default function Home() {
     }
   }, [handsInstance, handDetectionConfig, isHandDetectionEnabled]);
 
-  // 长按自动触发OCR（仅在达到hard等级时）
+  // Auto-trigger OCR on long-press (only at hard level)
   useEffect(() => {
     if (!isFingerLongPressLLMEnabled) return;
 
@@ -1423,45 +1445,45 @@ export default function Home() {
         fingerTipPosition && 
         !isProcessing) {
       
-      console.log('[LongPress] 达到hard等级自动触发OCR，持续时间:', longPressState.currentDuration);
+      console.log('[LongPress] Auto-trigger OCR at hard level, duration:', longPressState.currentDuration);
       
-      // 标记为已触发
+      // Mark as triggered
       longPressRef.current.hasTriggered = true;
       
-      // 设置为hard级别
+      // Set to hard level
       setLevel('hard');
       
-      // 触发OCR
+      // Trigger OCR
       onFingerSelection();
     }
   }, [isFingerLongPressLLMEnabled, longPressState.isActive, longPressState.currentDuration, longPressState.currentLevel, fingerTipPosition, isProcessing]);
 
-  // 定期分析兴趣模式
+  // Periodically analyze interest patterns
   useEffect(() => {
     if (!isInterestDetectionEnabled || movementTrail.length < 10) return;
     
     const analysisInterval = setInterval(() => {
       analyzeInterestPatterns();
-    }, 2000); // 每2秒分析一次
+    }, 2000); // Analyze every 2 seconds
     
     return () => clearInterval(analysisInterval);
   }, [isInterestDetectionEnabled, movementTrail.length]);
 
-  // 监听手指移开/消失触发
+  // Trigger when finger lifts/disappears
   useEffect(() => {
     if (!isFingerLongPressLLMEnabled) return;
 
     if (longPressState.shouldTriggerOnMove !== false && !isProcessing) {
-      console.log('[LongPress] 手指移开/消失触发OCR，使用级别:', longPressState.shouldTriggerOnMove);
+      console.log('[LongPress] Finger lifted/disappeared, trigger OCR at level:', longPressState.shouldTriggerOnMove);
       
-      // 标记为已触发
+      // Mark as triggered
       longPressRef.current.hasTriggered = true;
       
-      // 设置级别并触发OCR
+      // Set level and trigger OCR
       setLevel(longPressState.shouldTriggerOnMove);
       onFingerSelection();
       
-      // 清除触发标志
+      // Clear trigger flag
       setLongPressState(prev => ({
         ...prev,
         shouldTriggerOnMove: false
@@ -1469,66 +1491,66 @@ export default function Home() {
     }
   }, [isFingerLongPressLLMEnabled, longPressState.shouldTriggerOnMove, isProcessing]);
 
-    // 3) Apple Pencil pressure three levels (with轻微防抖)
+    // 3) Apple Pencil pressure three levels (with slight debounce)
   useEffect(() => {
     const el = overlayRef.current!;
     let last: Level = "light";
     let lastPressure = 0;
-    let maxLevelInSession: Level = "light"; // 记录本次按压的最高level
-    let isPressed = false; // 是否正在按压
+    let maxLevelInSession: Level = "light"; // Highest level in this press session
+    let isPressed = false; // Whether currently pressing
     let t: any;
     
-    // 降级机制相关变量
+    // Downgrade mechanism variables
     let downgradeTimer: any;
     let pendingDowngradeLevel: Level | null = null;
     let stableStartTime = 0;
     
     const onDown = (e: PointerEvent) => {
       if (e.pointerType === "pen") {
-        // 暂停视频
+        // Pause video
         const video = videoRef.current!;
         if (video && !video.paused) {
           video.pause();
           setIsVideoFrozen(true);
-          console.log('[Drawing] 视频已暂停，开始绘制模式');
+          console.log('[Drawing] Video paused, entering drawing mode');
         }
         
         isPressed = true;
-        setIsPressed(true); // 更新组件状态
-        maxLevelInSession = "light"; // 重置最高level
-        setCurrentMaxLevel("light"); // 同步状态
+        setIsPressed(true); // Update component state
+        maxLevelInSession = "light"; // Reset max level
+        setCurrentMaxLevel("light"); // Sync state
         
-        // 开始新的绘制路径
+        // Start a new drawing path
         const rect = (e.target as HTMLElement).getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
         setDrawingPath([{x, y}]);
         setSelectionBounds(null);
         
-        // 清除任何进行中的降级
+        // Clear any ongoing downgrade
         clearTimeout(downgradeTimer);
         pendingDowngradeLevel = null;
         stableStartTime = 0;
-        console.log('[Pressure] 开始新的按压会话');
+        console.log('[Pressure] Start new press session');
       }
     };
     
     const onUp = (e: PointerEvent) => {
       if (e.pointerType === "pen" && isPressed) {
         isPressed = false;
-        setIsPressed(false); // 更新组件状态
+        setIsPressed(false); // Update component state
         
-        // 清除降级计时器
+        // Clear downgrade timer
         clearTimeout(downgradeTimer);
         pendingDowngradeLevel = null;
         
-        // 使用本次按压的最高level
+        // Use highest level from this press session
         setLevel(maxLevelInSession);
-        setCurrentMaxLevel("light"); // 重置显示状态
-        console.log('[Pressure] 按压结束，使用最高level:', maxLevelInSession);
+        setCurrentMaxLevel("light"); // Reset display state
+        console.log('[Pressure] Press ended, using max level:', maxLevelInSession);
         setDebugInfo(`pressure end | final level: ${maxLevelInSession}`);
         
-        // 注意：不在这里计算selectionBounds，移到onPointerUp中处理
+        // Note: selectionBounds is computed in onPointerUp, not here
       }
     };
     
@@ -1536,79 +1558,79 @@ export default function Home() {
       const p = e.pressure ?? 0;
       const isPen = e.pointerType === "pen";
       
-      // 更新压力和设备类型状态
+      // Update pressure and device type state
       setCurrentPressure(p);
       setIsUsingPen(isPen);
       
       if (!isPen) return;
       
-      // 如果正在按压，记录绘制路径
+      // If pressing, record drawing path
       if (isPressed) {
         const rect = (e.target as HTMLElement).getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
         setDrawingPath(prev => {
           const newPath = [...prev, {x, y}];
-          if (newPath.length % 5 === 0) { // 每5个点打印一次，避免日志过多
+          if (newPath.length % 5 === 0) { // Log every 5 points to avoid noise
             console.log('[Drawing] 路径点数:', newPath.length, '最新点:', {x: x.toFixed(1), y: y.toFixed(1)});
           }
           return newPath;
         });
       }
       
-      if (!isPressed) return; // 只在按压过程中处理压力level
+      if (!isPressed) return; // Only handle pressure during press
       
-      // Apple Pencil 1代和2代都有压力感应
+      // Apple Pencil gen 1/2 support pressure
       const currentLevel: Level = p < 0.33 ? "light" : p < 0.66 ? "medium" : "hard";
       
-      // 升级逻辑：立即升级到更高level
+      // Upgrade logic: immediately move to higher level
       if (currentLevel === "hard" || (currentLevel === "medium" && maxLevelInSession === "light")) {
         maxLevelInSession = currentLevel;
-        setCurrentMaxLevel(currentLevel); // 同步状态
-        clearTimeout(downgradeTimer); // 清除降级计时器
+        setCurrentMaxLevel(currentLevel); // Sync state
+        clearTimeout(downgradeTimer); // Clear downgrade timer
         pendingDowngradeLevel = null;
         stableStartTime = 0;
       }
       
-      // 降级逻辑：需要稳定0.5秒才能降级
+      // Downgrade logic: require 0.5s stability before downgrading
       const levelOrder = { "light": 0, "medium": 1, "hard": 2 };
       if (levelOrder[currentLevel] < levelOrder[maxLevelInSession]) {
-        // 当前压力对应的level低于最高level，开始降级计时
+        // Current pressure level is below max level; start downgrade timer
         
         if (pendingDowngradeLevel !== currentLevel) {
-          // 开始新的降级计时
+          // Start a new downgrade timer
           pendingDowngradeLevel = currentLevel;
           stableStartTime = Date.now();
           clearTimeout(downgradeTimer);
           
           downgradeTimer = setTimeout(() => {
-            // 0.5秒后确认降级
+            // Confirm downgrade after 0.5s
             if (pendingDowngradeLevel === currentLevel && isPressed) {
               maxLevelInSession = currentLevel;
-              setCurrentMaxLevel(currentLevel); // 同步状态
-              console.log('[Pressure] 稳定降级到:', currentLevel);
+              setCurrentMaxLevel(currentLevel); // Sync state
+              console.log('[Pressure] Downgraded after stability:', currentLevel);
               setDebugInfo(`✏️ pressure: ${p.toFixed(3)} | downgrade to: ${currentLevel} | current highest: ${maxLevelInSession}`);
             }
-          }, 500); // 0.5秒稳定时间
+          }, 500); // 0.5s stability window
           
-          console.log('[Pressure] 开始降级计时到:', currentLevel);
+          console.log('[Pressure] Start downgrade timer to:', currentLevel);
         }
         
-        // 显示降级倒计时
+        // Show downgrade countdown
         const elapsed = Date.now() - stableStartTime;
         const remaining = Math.max(0, 500 - elapsed);
         setDebugInfo(`✏️ pressure: ${p.toFixed(3)} | current: ${currentLevel} | highest: ${maxLevelInSession} | downgrade countdown: ${(remaining/1000).toFixed(1)}s`);
         
       } else {
-        // 压力回升，取消降级
+        // Pressure increased, cancel downgrade
         if (pendingDowngradeLevel) {
           clearTimeout(downgradeTimer);
           pendingDowngradeLevel = null;
           stableStartTime = 0;
-          console.log('[Pressure] 压力回升，取消降级');
+          console.log('[Pressure] Pressure rose, cancel downgrade');
         }
         
-        // 正常显示
+        // Normal display
         setDebugInfo(`✏️ pressure: ${p.toFixed(3)} | current: ${currentLevel} | highest: ${maxLevelInSession}`);
       }
       
@@ -1619,8 +1641,8 @@ export default function Home() {
       setIsUsingPen(false);
       setDebugInfo('');
       isPressed = false;
-      setIsPressed(false); // 更新组件状态
-      setCurrentMaxLevel("light"); // 重置显示状态
+      setIsPressed(false); // Update component state
+      setCurrentMaxLevel("light"); // Reset display state
     };
     
     el.addEventListener("pointerdown", onDown, { passive: true });
@@ -1637,12 +1659,12 @@ export default function Home() {
     };
   }, [level]);
 
-  // 4) 基于手指位置计算选择区域
+  // 4) Compute selection area from fingertip position
   const calculateFingerSelectionArea = (fingerPos: {x: number, y: number}) => {
-    // 在手指上方创建一个选择区域
-    const areaWidth = 120;  // 选择区域宽度
-    const areaHeight = 80;  // 选择区域高度
-    const offsetY = -50;   // 向上偏移，避开手指遮挡
+    // Create a selection area above the finger
+    const areaWidth = 120;  // Selection area width
+    const areaHeight = 80;  // Selection area height
+    const offsetY = -50;   // Upward offset to avoid finger occlusion
     
     return {
       left: Math.max(0, fingerPos.x - areaWidth / 2),
@@ -1654,27 +1676,27 @@ export default function Home() {
 
 
 
-  // 5) 手指模式截屏函数（到达light级别时调用）
+  // 5) Finger-mode screenshot function (called at light level)
   const takeFingerScreenshot = async (fingerPos: {x: number, y: number}) => {
     if (longPressRef.current.hasScreenshot) {
-      return; // 已经截过屏了
+      return; // Already captured
     }
     
-    console.log('[Screenshot] 到达light级别，开始截屏，位置:', fingerPos);
+    console.log('[Screenshot] Reached light level, start capture, position:', fingerPos);
     longPressRef.current.hasScreenshot = true;
     
-    // finger模式保持视频播放，不暂停！否则无法继续检测手指
-    console.log('[Screenshot] finger模式保持视频播放，继续检测手指位置');
+    // Keep video playing in finger mode; otherwise fingertip detection stops
+    console.log('[Screenshot] Keep video playing in finger mode for detection');
     
-    // 计算选择区域
+    // Compute selection area
     const selectionArea = calculateFingerSelectionArea(fingerPos);
     setSelectionBounds(selectionArea);
     
-    // 这里只截屏，不做OCR，OCR留给后续的触发逻辑
-    console.log('[Screenshot] 截屏完成，等待OCR触发');
+    // Only capture now; OCR will be triggered later
+    console.log('[Screenshot] Capture done, waiting for OCR trigger');
   };
 
-  // 6) 手指选择处理函数（OCR处理，使用已截好的屏）
+  // 6) Finger selection handler (OCR uses captured frame)
   const onFingerSelection = async () => {
     if (captureLockRef.current) { console.log('[Finger] capture busy, skip'); return; }
     captureLockRef.current = true;
@@ -1698,21 +1720,21 @@ export default function Home() {
     
     setDebugInfo(`👆 finger mode: selection area ${selectionBounds.width}×${selectionBounds.height}px`);
     
-    // 使用Three.js渲染画面进行所见即所得截图
+    // Use Three.js render for WYSIWYG capture
     try {
       const renderer = threeRendererRef.current;
       const scene = threeSceneRef.current;
       const camera = threeCameraRef.current;
       const renderCanvas = renderer?.domElement;
       if (!renderer || !scene || !camera || !renderCanvas) {
-        console.warn('[Finger] Three.js未就绪，回退旧截图逻辑');
-        // 若未就绪则保持旧路径（避免中断）
+        console.warn('[Finger] Three.js not ready, fallback to legacy capture');
+        // Keep legacy path to avoid interruption
         return;
       }
       
-      // 直接从Three渲染canvas截取所选区域（考虑DPR）
-      // 高分辨率导出（scale=2 或 3 可选）
-      // iPad等设备降级scale以避免OOM
+      // Crop selected region from Three.js canvas (with DPR)
+      // High-res export (scale=2 or 3 optional)
+      // Lower scale on iPad-class devices to avoid OOM
       const isIPad = /iPad|iPhone|iPod/.test(navigator.userAgent) || ((/Macintosh/.test(navigator.userAgent)) && (navigator.maxTouchPoints > 1));
       const scale = isIPad ? 1.5 : 2;
       const cropCanvas = captureWYSIWYGRegionHiRes(selectionBounds, scale) || captureWYSIWYGRegion(selectionBounds);
@@ -1723,7 +1745,7 @@ export default function Home() {
       }
       console.log('[Finger] 手指模式截图完成（Three.js WYSIWYG）');
       
-      // 图像增强处理
+      // Image enhancement
       if (isEnhancementEnabled) {
         const ctx2d = cropCanvas.getContext('2d')!;
         const imageData = ctx2d.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
@@ -1741,17 +1763,17 @@ export default function Home() {
         }
         
         ctx2d.putImageData(imageData, 0, 0);
-        console.log('[Finger] ✅ 图像增强完成');
+        console.log('[Finger] ✅ Image enhancement done');
       }
       
-      // 获取处理后的图像（改用所见即所得）
+      // Get processed image (WYSIWYG)
       const imageDataUrl = cropCanvas.toDataURL();
-      // 推迟更新UI，避免阻塞主线程
+      // Defer UI update to avoid blocking main thread
       setTimeout(() => {
         try { setCapturedImage(imageDataUrl); } catch {}
       }, 0);
       
-      // OCR识别
+      // OCR recognition
       console.log('[Finger] 开始OCR识别...');
       const { data: { text } } = await worker.recognize(cropCanvas);
       const picked = text.trim().slice(0, 400);
@@ -1770,7 +1792,7 @@ export default function Home() {
         return;
       }
       
-      // 调用LLM
+      // Call LLM
       const resp = await fetch("/api/llm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1782,13 +1804,13 @@ export default function Home() {
       }
       
       if (isStreaming) {
-        // 流式响应处理
+        // Streaming response handling
         const reader = resp.body?.getReader();
         if (!reader) throw new Error('无法获取流式响应');
         
         setAnswer("");
         
-        // 设置浮窗位置（在选择区域旁边）
+        // Set floating panel position (beside selection)
         if (selectionBounds) {
           const videoContainer = document.querySelector('.video-container');
           const containerRect = videoContainer?.getBoundingClientRect();
@@ -1850,14 +1872,14 @@ export default function Home() {
           reader.releaseLock();
         }
       } else {
-        // 非流式响应
+        // Non-streaming response
         const data = await resp.json();
         const content = data.content || "No response";
         
         console.log('[Finger] LLM响应完成:', { contentLength: content.length });
         setAnswer(`👆 finger mode: result:\n\n${content}`);
         
-        // 设置浮窗
+        // Set floating panel
         if (selectionBounds) {
           const videoContainer = document.querySelector('.video-container');
           const containerRect = videoContainer?.getBoundingClientRect();
@@ -1887,7 +1909,7 @@ export default function Home() {
     }
   };
 
-  // 6) 点按（PointerUp 更稳）→ 裁 ROI → OCR → 调 LLM
+  // 6) Tap (PointerUp is more stable) → crop ROI → OCR → LLM
   const onPointerUp = async (e: React.PointerEvent<HTMLElement>) => {
     console.log('[Click] 检测到点击事件:', {
       pointerType: e.pointerType,
@@ -1900,19 +1922,19 @@ export default function Home() {
       drawingPathLength: drawingPath.length
     });
     
-    // 防止重复处理
+    // Prevent duplicate processing
     if (isProcessing) {
       console.log('[OCR] 已在处理中，跳过');
       return;
     }
     setIsProcessing(true);
 
-    // 首先计算绘制区域的边界
+    // First compute drawing bounds
     let calculatedBounds = null;
     if (drawingPath.length >= 1) {
       let bounds;
       
-      // 计算笔迹的总运动距离
+      // Compute total stroke travel distance
       let totalDistance = 0;
       for (let i = 1; i < drawingPath.length; i++) {
         const dx = drawingPath[i].x - drawingPath[i-1].x;
@@ -1927,9 +1949,9 @@ export default function Home() {
       });
       
       if (totalDistance < 30) {
-        // 运动距离小于30px，视为单点点击
+        // If movement < 30px, treat as a tap
         const point = drawingPath[0];
-        const defaultSize = 150; // 默认区域大小
+        const defaultSize = 150; // Default region size
         bounds = {
           left: Math.max(0, point.x - defaultSize/2),
           top: Math.max(0, point.y - defaultSize/2),
@@ -1938,10 +1960,10 @@ export default function Home() {
         };
         console.log('[Drawing] 单点点击 (距离<30px)，使用默认区域:', bounds);
       } else {
-        // 运动距离大，真正的绘制
+        // Larger movement indicates real drawing
         const xs = drawingPath.map(p => p.x);
         const ys = drawingPath.map(p => p.y);
-        const margin = 1; // 边距
+        const margin = 1; // Margin
         bounds = {
           left: Math.max(0, Math.min(...xs) - margin),
           top: Math.max(0, Math.min(...ys) - margin),
@@ -1961,9 +1983,9 @@ export default function Home() {
     
     setDebugInfo(`Click detected: ${e.pointerType} pressure:${e.pressure?.toFixed(2) || 'N/A'}`);
     
-    // 不再暂停视频；Three.js实时渲染，直接从渲染canvas截取
+    // Don't pause video; crop directly from Three.js render canvas
     
-    // 更新当前压力显示
+    // Update current pressure display
     setCurrentPressure(e.pressure || 0);
     setIsUsingPen(e.pointerType === "pen");
     
@@ -1990,7 +2012,7 @@ export default function Home() {
       return;
     }
     
-    // 直接从overlay截图，避免复杂的坐标转换
+    // Capture directly from overlay to avoid complex coord transforms
     console.log('[OCR] 使用overlay直接截图方法');
     
     if (!calculatedBounds || calculatedBounds.width <= 5 || calculatedBounds.height <= 5) {
@@ -1999,49 +2021,49 @@ export default function Home() {
       return;
     }
     
-    // 创建canvas用于截图
+    // Create canvas for capture
     const canvas = document.createElement("canvas");
     canvas.width = calculatedBounds.width;
     canvas.height = calculatedBounds.height;
     const ctx = canvas.getContext("2d")!;
     
-    // 图像增强函数
+    // Image enhancement function
     const enhanceImage = (canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D) => {
       console.log('[Enhancement] start image enhancement processing...');
       
-      // 获取图像数据
+      // Get image data
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = imageData.data;
       
-      // 增强对比度和亮度
+      // Enhance contrast and brightness
       for (let i = 0; i < data.length; i += 4) {
-        // RGB 值
+        // RGB values
         let r = data[i];
         let g = data[i + 1];
         let b = data[i + 2];
         
-        // 转换为灰度值（用于文字识别效果更好）
+        // Convert to grayscale (better for text recognition)
         const gray = 0.299 * r + 0.587 * g + 0.114 * b;
         
-        // 增强对比度（让文字更清晰）
-        const contrast = 1.5; // 对比度增强系数
-        const brightness = 20; // 亮度调整
+        // Enhance contrast (sharper text)
+        const contrast = 1.5; // Contrast gain
+        const brightness = 20; // Brightness adjustment
         
         let enhanced = contrast * (gray - 128) + 128 + brightness;
         enhanced = Math.max(0, Math.min(255, enhanced));
         
-        // 应用二值化处理（对文字识别很有帮助）
+        // Apply binarization (helps OCR)
         const threshold = 128;
         enhanced = enhanced > threshold ? 255 : 0;
         
-        // 设置增强后的值
+        // Set enhanced values
         data[i] = enhanced;     // R
         data[i + 1] = enhanced; // G  
         data[i + 2] = enhanced; // B
-        // Alpha 通道保持不变
+        // Keep alpha channel unchanged
       }
       
-      // 将处理后的数据写回canvas
+      // Write processed data back to canvas
       ctx.putImageData(imageData, 0, 0);
       console.log('[Enhancement] ✅ 图像增强完成（对比度+二值化）');
     };
@@ -2052,16 +2074,16 @@ export default function Home() {
     });
 
     try {
-      // 方法：使用getDisplayMedia API或直接从DOM截图
-      // 但最简单的方法是创建一个临时的canvas来绘制整个overlay，然后裁剪
+      // Method: use getDisplayMedia or DOM snapshot
+      // Easiest: draw overlay to a temp canvas, then crop
       
       console.log('[Screenshot] 开始截取overlay区域...');
       
-      // 获取各种尺寸信息用于调试
+      // Collect size info for debugging
       const overlayRect = overlay.getBoundingClientRect();
       const videoRect = v.getBoundingClientRect();
       const videoNaturalSize = { width: v.videoWidth, height: v.videoHeight };
-      const containerSize = { width: 500, height: 500 }; // 你设置的容器尺寸
+      const containerSize = { width: 500, height: 500 }; // Configured container size
       
       console.log('[Debug] 尺寸对比:', {
         蓝框区域: calculatedBounds,
@@ -2072,7 +2094,7 @@ export default function Home() {
         当前变换: { scale: videoScale, translate: videoTranslate }
       });
       
-      // 创建一个临时canvas来绘制整个overlay内容
+      // Create temp canvas to draw full overlay
       const tempCanvas = document.createElement("canvas");
       tempCanvas.width = overlayRect.width;
       tempCanvas.height = overlayRect.height;
@@ -2080,22 +2102,22 @@ export default function Home() {
       
       console.log('[Debug] 临时Canvas尺寸:', { width: tempCanvas.width, height: tempCanvas.height });
       
-      // 绘制video到临时canvas（包含所有变换）
+      // Draw video into temp canvas (with all transforms)
       tempCtx.save();
       
       console.log('[Debug] 开始应用变换...');
       
-      // 应用与video相同的变换
+      // Apply same transforms as video
       tempCtx.translate(tempCanvas.width / 2, tempCanvas.height / 2);
       console.log('[Debug] 1. 移动到中心:', tempCanvas.width / 2, tempCanvas.height / 2);
       
-      tempCtx.scale(-1, 1); // 水平翻转
+      tempCtx.scale(-1, 1); // Horizontal flip
       console.log('[Debug] 2. 水平翻转');
       
-      tempCtx.scale(videoScale, videoScale); // 缩放
+      tempCtx.scale(videoScale, videoScale); // Scale
       console.log('[Debug] 3. 缩放:', videoScale);
       
-      tempCtx.translate(videoTranslate.x, videoTranslate.y); // 平移
+      tempCtx.translate(videoTranslate.x, videoTranslate.y); // Translate
       console.log('[Debug] 4. 平移:', videoTranslate.x, videoTranslate.y);
       
       tempCtx.translate(-tempCanvas.width / 2, -tempCanvas.height / 2);
@@ -2103,21 +2125,21 @@ export default function Home() {
       console.log('[Debug] 注意：截图不包含透视变换（Canvas 2D限制），透视强度:', perspectiveStrength);
       console.log('[Debug] 坐标系统已修复：透视和其他变换分离处理');
       
-      // 绘制video，保持原始宽高比
-      // 问题可能在这里：我们应该绘制video的原始尺寸，而不是强制拉伸到canvas尺寸
+      // Draw video preserving aspect ratio
+      // Potential issue: should draw native size instead of stretching to canvas
       const videoAspect = v.videoWidth / v.videoHeight;
       const canvasAspect = tempCanvas.width / tempCanvas.height;
       
       let drawWidth, drawHeight, drawX, drawY;
       
       if (videoAspect > canvasAspect) {
-        // video更宽，以宽度为准
+        // Video is wider; use width
         drawWidth = tempCanvas.width;
         drawHeight = tempCanvas.width / videoAspect;
         drawX = 0;
         drawY = (tempCanvas.height - drawHeight) / 2;
       } else {
-        // video更高，以高度为准
+        // Video is taller; use height
         drawHeight = tempCanvas.height;
         drawWidth = tempCanvas.height * videoAspect;
         drawX = (tempCanvas.width - drawWidth) / 2;
@@ -2133,14 +2155,14 @@ export default function Home() {
       tempCtx.drawImage(v, drawX, drawY, drawWidth, drawHeight);
       tempCtx.restore();
       
-      // 从临时canvas中提取选择区域
+      // Extract selection from temp canvas
       console.log('[Debug] 准备提取区域:', {
         提取坐标: calculatedBounds,
         临时Canvas尺寸: { width: tempCanvas.width, height: tempCanvas.height },
         最终Canvas尺寸: { width: canvas.width, height: canvas.height }
       });
       
-      // 检查提取区域是否超出边界
+      // Check extraction region bounds
       const safeLeft = Math.max(0, Math.min(calculatedBounds.left, tempCanvas.width - 1));
       const safeTop = Math.max(0, Math.min(calculatedBounds.top, tempCanvas.height - 1));
       const safeWidth = Math.min(calculatedBounds.width, tempCanvas.width - safeLeft);
@@ -2164,18 +2186,18 @@ export default function Home() {
         dataLength: selectionImageData.data.length
       });
       
-      // 将提取的区域绘制到最终canvas
+      // Draw extracted region onto final canvas
       ctx.putImageData(selectionImageData, 0, 0);
       
       console.log('[Screenshot] 从overlay截图完成');
       
-      // 额外调试：保存临时canvas用于检查
+      // Extra debug: save temp canvas for inspection
       const tempDataURL = tempCanvas.toDataURL();
       console.log('[Debug] 临时Canvas内容长度:', tempDataURL.length);
       console.log('[Debug] 你可以在浏览器控制台复制这个URL查看临时canvas内容:');
       console.log(tempDataURL.substring(0, 100) + '...');
       
-      // 检查canvas是否真的有内容
+      // Verify canvas has content
       const imageData = ctx.getImageData(0, 0, Math.min(10, canvas.width), Math.min(10, canvas.height));
       const hasContent = imageData.data.some(pixel => pixel !== 0);
       console.log('[Click] Canvas内容检查:', { 
@@ -2186,25 +2208,25 @@ export default function Home() {
       if (!hasContent) {
         console.error('[Click] Canvas内容为空！尝试iPad备用捕获方法...');
         
-        // iPad备用方法：尝试不同的绘制参数
+        // iPad fallback: try different draw parameters
         try {
-          // 方法1：确保视频完全加载
+          // Method 1: ensure video fully loaded
           if (v.readyState < 2) {
             setAnswer("Error: Video not fully loaded, please wait for video to be ready");
             setCapturedImage("");
             return;
           }
           
-          // 方法2：尝试绘制整个视频然后裁剪
+          // Method 2: draw full video then crop
           const tempCanvas = document.createElement("canvas");
           tempCanvas.width = v.videoWidth;
           tempCanvas.height = v.videoHeight;
           const tempCtx = tempCanvas.getContext("2d")!;
           
-          // 绘制整个视频帧
+          // Draw full video frame
           tempCtx.drawImage(v, 0, 0);
           
-          // 检查整个视频帧是否有内容
+          // Check full video frame has content
           const fullImageData = tempCtx.getImageData(0, 0, Math.min(10, v.videoWidth), Math.min(10, v.videoHeight));
           const fullHasContent = fullImageData.data.some(pixel => pixel !== 0);
           
@@ -2214,7 +2236,7 @@ export default function Home() {
             return;
           }
           
-          // 从完整视频帧中提取ROI
+          // Extract ROI from full video frame
           const roiImageData = tempCtx.getImageData(
             calculatedBounds.left, calculatedBounds.top, 
             calculatedBounds.width, calculatedBounds.height
@@ -2244,7 +2266,7 @@ export default function Home() {
       videoSize: { width: v.videoWidth, height: v.videoHeight }
     });
 
-    // 所见即所得：从Three.js渲染canvas裁切
+    // WYSIWYG: crop from Three.js render canvas
     const region = calculatedBounds || selectionBounds;
     const isIPad = /iPad|iPhone|iPod/.test(navigator.userAgent) || ((/Macintosh/.test(navigator.userAgent)) && (navigator.maxTouchPoints > 1));
     const scale = isIPad ? 1.5 : 2;
@@ -2264,7 +2286,7 @@ export default function Home() {
       return;
     }
     
-    // 根据设置决定是否进行图像增强
+    // Apply image enhancement depending on settings
     if (isEnhancementEnabled) {
       const ctx = cropSource.getContext('2d')!;
       enhanceImage(cropSource, ctx);
@@ -2273,7 +2295,7 @@ export default function Home() {
       console.log('[Enhancement] ⚪ 图像增强已禁用');
     }
     
-    // 获取处理后的图像用于显示
+    // Get processed image for display
     setTimeout(() => {
       try { setCapturedImage(imageDataUrl); } catch {}
     }, 0);
@@ -2297,7 +2319,7 @@ export default function Home() {
         return;
       }
 
-      // 调 LLM
+      // Call LLM
       const resp = await fetch("/api/llm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2319,14 +2341,14 @@ export default function Home() {
 
         setAnswer(""); // Clear previous answer
         
-        // 初始化浮窗位置
+        // Initialize floating panel position
         if (calculatedBounds) {
           const containerWidth = 500;
           const floatingWidth = 240;
           
           let floatingX, floatingY;
           
-          // 获取video容器在页面中的位置
+          // Get video container position on page
           const videoContainer = document.querySelector('.video-container');
           const containerRect = videoContainer?.getBoundingClientRect();
           
@@ -2373,7 +2395,7 @@ export default function Home() {
                     streamingText += content;
                     setAnswer(prev => prev + content);
                     
-                    // 更新浮窗内容
+                    // Update floating panel content
                     if (calculatedBounds) {
                       setFloatingResponse(prev => prev ? {
                         ...prev,
@@ -2398,26 +2420,26 @@ export default function Home() {
         console.log('[LLM] 响应完成:', { contentLength: content.length });
         setAnswer(content);
         
-        // 设置浮窗位置（在选择框旁边）
+        // Set floating panel position (beside selection)
         if (calculatedBounds) {
-          const containerWidth = 500; // 视频容器宽度
-          const floatingWidth = 240; // 浮窗大约宽度
+          const containerWidth = 500; // Video container width
+          const floatingWidth = 240; // Approx floating width
           
-          // 智能位置：显示在选择框上面
+          // Smart position: above selection box
           let floatingX, floatingY;
           
-          // 获取video容器在页面中的位置
+          // Get video container position on page
           const videoContainer = document.querySelector('.video-container');
           const containerRect = videoContainer?.getBoundingClientRect();
           
           if (containerRect) {
-            // X坐标：相对于页面的绝对位置
+            // X coordinate: absolute page position
             floatingX = containerRect.left + calculatedBounds.left + calculatedBounds.width / 2;
             
-            // Y坐标：相对于页面的绝对位置，显示在选择框上面
+            // Y coordinate: absolute page position, above selection
             floatingY = containerRect.top + calculatedBounds.top - 10;
           } else {
-            // 备用方案
+            // Fallback
             floatingX = calculatedBounds.left + calculatedBounds.width / 2;
             floatingY = calculatedBounds.top - 10;
           }
@@ -2455,9 +2477,15 @@ export default function Home() {
         )}
         {debugInfo && <div className="mt-1 text-xs text-blue-600">🔍 {debugInfo}</div>}
         {/* {deviceInfo && <div className="mt-1 text-xs text-purple-600">📱 {deviceInfo}</div>} */}
+        <button
+          onClick={() => sessionLogger.exportJson(deviceInfo)}
+          className="ml-auto px-3 py-1 rounded text-xs bg-black text-white hover:bg-gray-900"
+        >
+          download session package
+        </button>
       </div>
 
-      {/* 数据采集开关 & 简单统计 */}
+      {/* Data logging toggle & basic stats */}
       <div className="mb-3 flex flex-wrap gap-3 items-center text-sm">
         <div className="flex items-center gap-2">
           <span className="text-gray-600">data logging:</span>
@@ -2483,17 +2511,12 @@ export default function Home() {
             );
           })()}
         </div>
-        <button
-          onClick={() => sessionLogger.exportJson(deviceInfo)}
-          className="ml-auto px-3 py-1 rounded text-xs bg-black text-white hover:bg-gray-900"
-        >
-          download session JSON
-        </button>
+      
       </div>
 
       
 
-      {/* 压力条显示 */}
+      {/* Pressure bar */}
       {(
         <div className="mb-3 p-2 bg-gray-100 rounded-lg">
           <div className="text-xs text-gray-600 mb-1">pressure bar</div>
@@ -2505,13 +2528,13 @@ export default function Home() {
               }`}
               style={{ 
                 width: `${isPressed ? Math.min(100, currentPressure * 100) : 0}%`,
-                transition: 'none' // 移除过渡动画，实现实时响应
+                transition: 'none' // Remove transition for realtime response
               }}
             />
             <div className="absolute inset-0 flex items-center justify-center text-xs font-medium text-white mix-blend-difference">
               {isPressed ? (currentPressure * 100).toFixed(0) : 0}%
             </div>
-            {/* 压力等级分界线 */}
+            {/* Pressure level separators */}
             <div className="absolute top-0 left-1/3 w-px h-full bg-white opacity-50" />
             <div className="absolute top-0 left-2/3 w-px h-full bg-white opacity-50" />
           </div>
@@ -2523,7 +2546,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* 模式切换 */}
+      {/* Mode switch */}
       <div className="mb-3 flex gap-2 items-center">
         <span className="text-sm text-gray-600">input mode:</span>
         <button
@@ -2531,7 +2554,7 @@ export default function Home() {
             setHandDetectionMode('pencil');
             setIsHandDetectionEnabled(false);
             setFingerTipPosition(null);
-            // setDebugInfo('切换到 Apple Pencil 模式');
+            // setDebugInfo('Switched to Apple Pencil mode');
           }}
           className={`px-3 py-1 rounded text-sm transition-colors ${
             handDetectionMode === 'pencil'
@@ -2547,7 +2570,7 @@ export default function Home() {
             setIsHandDetectionEnabled(true);
             setDrawingPath([]);
             setSelectionBounds(null);
-            // setDebugInfo('切换到手指检测模式，请将手指指向纸面文字');
+            // setDebugInfo('Switched to finger mode, point at text');
           }}
           className={`px-3 py-1 rounded text-sm transition-colors ${
             handDetectionMode === 'finger'
@@ -2559,7 +2582,7 @@ export default function Home() {
         </button>
       </div>
 
-      {/* 兴趣度检测控制 */}
+      {/* Interest detection controls */}
       <div className="mb-3 flex gap-2 items-center">
         <span className="text-sm text-gray-600">intention detection:</span>
         <button
@@ -2592,7 +2615,7 @@ export default function Home() {
         )} */}
       </div>
 
-      {/* 手指长按自动调用 LLM 开关 */}
+      {/* Finger long-press LLM toggle */}
       <div className="mb-3 flex gap-2 items-center">
         <span className="text-sm text-gray-600">finger long-press LLM:</span>
         <button
@@ -2612,7 +2635,7 @@ export default function Home() {
         </span>
       </div>
 
-      {/* 兴趣度分析结果显示 */}
+      {/* Interest analysis results */}
       {isInterestDetectionEnabled && interestAnalysis && (
         <div className="mb-3 p-3 bg-purple-50 rounded-lg border border-purple-200">
           {/* <div className="text-sm text-purple-700 mb-2">
@@ -2631,7 +2654,7 @@ export default function Home() {
             )}
           </div> */}
           
-          {/* 兴趣度趋势图 */}
+          {/* Interest trend chart */}
           {/* <div className="mt-2">
             <div className="text-xs text-purple-600 mb-1">兴趣度趋势:</div>
             <div className="flex items-end space-x-1 h-8">
@@ -2654,7 +2677,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* 手指检测状态显示 */}
+      {/* Finger detection status */}
       {/* {handDetectionMode === 'finger' && (
         <div className="mb-3 p-3 bg-green-50 rounded-lg border border-green-200">
           <div className="text-sm text-green-700 mb-2">
@@ -2711,7 +2734,7 @@ export default function Home() {
                     };
                     setHandDetectionConfig(newConfig);
                     
-                    // 如果实例存在，立即更新配置
+                    // If instance exists, update config immediately
                     if (handsInstance) {
                       handsInstance.setOptions({
                         maxNumHands: 1,
@@ -2794,11 +2817,11 @@ export default function Home() {
         </div>
       )} */}
 
-      {/* Apple Pencil 1代手动level切换 */}
+      {/* Apple Pencil gen1 manual level switch */}
       <div className="mb-3 flex gap-2">
         <span className="text-sm text-gray-600">pressure level:</span>
         {(['light', 'medium', 'hard'] as Level[]).map((l) => {
-          // 如果正在按压，显示currentMaxLevel；否则显示设定的level
+          // If pressing, show currentMaxLevel; otherwise show configured level
           const isActive = isPressed ? (currentMaxLevel === l) : (level === l);
           
           return (
@@ -2819,7 +2842,7 @@ export default function Home() {
         })}
       </div>
 
-      {/* 流式显示切换 */}
+      {/* Streaming response toggle */}
       <div className="mb-3 flex gap-2 items-center">
         <span className="text-sm text-gray-600">response mode:</span>
         <button
@@ -2834,7 +2857,7 @@ export default function Home() {
         </button>
       </div>
 
-      {/* 图像增强切换 */}
+      {/* Image enhancement toggle */}
       <div className="mb-3 flex gap-2 items-center">
         <span className="text-sm text-gray-600">image enhancement:</span>
         <button
@@ -2851,7 +2874,7 @@ export default function Home() {
           {isEnhancementEnabled ? '(contrast + grayscale + binarization)' : '(raw camera image)'}
         </span>
       </div>
-      {/* 行距补偿（三挡） */}
+      {/* Line spacing compensation (three levels) */}
       <div className="mb-3 flex gap-2 items-center">
         <span className="text-sm text-gray-600">warp:</span>
         <div className="flex items-center gap-2">
@@ -2895,7 +2918,7 @@ export default function Home() {
         </span>
       </div>
 
-      {/* 透视强度控制 */}
+      {/* Perspective strength control */}
       <div className="mb-3 flex gap-2 items-center">
         <span className="text-sm text-gray-600">perspective:</span>
         <div className="flex items-center gap-2">
@@ -2930,20 +2953,20 @@ export default function Home() {
          style={{
            width: '500px',
            height: '500px',
-           touchAction: 'pan-x pan-y pinch-zoom' // 允许平移和缩放
+          touchAction: 'pan-x pan-y pinch-zoom' // Allow pan and zoom
          }}
         >
-          {/* 隐藏的video元素（仅用作Three.js纹理源） */}
+          {/* Hidden video element (used only as Three.js texture source) */}
           <video 
             ref={videoRef} 
             className="video-element" 
             playsInline 
             style={{
-              display: 'none' // 隐藏原生video，使用Three.js渲染
+              display: 'none' // Hide native video; render via Three.js
             }}
           />
           
-          {/* Three.js渲染canvas（显示实时3D效果） */}
+          {/* Three.js render canvas (realtime 3D) */}
           <canvas
             ref={threeCanvasRef}
             style={{
@@ -2952,20 +2975,20 @@ export default function Home() {
               left: 0,
               width: '500px',
               height: '500px',
-              pointerEvents: 'none' // 不接收事件，由overlay处理
+              pointerEvents: 'none' // No events; overlay handles input
             }}
           />
-        {/* OCR 叠加层（仅绘制词框） */}
+        {/* OCR overlay (word boxes only) */}
         <canvas
           ref={ocrOverlayCanvasRef}
           className="absolute inset-0 pointer-events-none"
           style={{ width: '500px', height: '500px' }}
         />
-        {/* 盖在视频上用于接收手势事件 */}
+        {/* Overlay to receive gesture events */}
         <div
           ref={overlayRef}
           onPointerUp={(e) => {
-            // 只有Apple Pencil才触发OCR
+            // Only Apple Pencil triggers OCR
             if (e.pointerType === "pen") {
               console.log('[Events] Apple Pencil PointerUp - 触发OCR');
               onPointerUp(e);
@@ -2974,7 +2997,7 @@ export default function Home() {
             }
           }}
           onPointerDown={(e) => {
-            // 如果正在拖拽浮窗，不处理其他手势
+            // If dragging the floating panel, ignore other gestures
             if (isDraggingFloat) return;
             
             console.log('[Events] PointerDown:', {
@@ -2986,11 +3009,11 @@ export default function Home() {
             });
             
             if (e.pointerType === "pen") {
-              // Apple Pencil - 只用于绘制，不处理拖拽
+              // Apple Pencil - drawing only, no drag
               console.log('[Pencil] Apple Pencil按下，准备绘制');
               setDebugInfo(`✏️ Apple Pencil: pressure:${e.pressure?.toFixed(2) || 'N/A'}`);
             } else if (e.pointerType === "touch") {
-              // 手指 - 用于缩放拖拽
+              // Finger - used for zoom/drag
               console.log('[Finger] 手指按下，准备手势操作');
               (e.currentTarget as any).lastPointerX = e.clientX;
               (e.currentTarget as any).lastPointerY = e.clientY;
@@ -3001,7 +3024,7 @@ export default function Home() {
           }}
           onTouchStart={(e) => {
             if (e.touches.length === 2) {
-              // 双指缩放开始（只有手指能产生双指触摸）
+              // Two-finger zoom start (only touch can do multi-touch)
               const touch1 = e.touches[0];
               const touch2 = e.touches[1];
               const distance = Math.sqrt(
@@ -3015,14 +3038,14 @@ export default function Home() {
             }
           }}
           onPointerMove={(e) => {
-            // 如果正在拖拽浮窗，不处理其他手势
+            // If dragging the floating panel, ignore other gestures
             if (isDraggingFloat) return;
             
             if (e.pointerType === "pen") {
-              // Apple Pencil - 只处理绘制，不处理拖拽
+              // Apple Pencil - drawing only, no drag
               return;
             } else if (e.pointerType === "touch") {
-              // 手指拖拽处理（仅在放大时允许）
+              // Finger drag (only when zoomed)
               const fingerPointerId = (e.currentTarget as any).fingerPointerId;
               const lastX = (e.currentTarget as any).lastPointerX;
               const lastY = (e.currentTarget as any).lastPointerY;
@@ -3032,9 +3055,9 @@ export default function Home() {
                 const deltaX = e.clientX - lastX;
                 const deltaY = e.clientY - lastY;
                 
-                // 由于视频有水平翻转，X方向需要反向
+                // Video is mirrored; X needs to be inverted
                 setVideoTranslate({
-                  x: initialTranslate.x - deltaX / videoScale, // 注意这里是减号
+                  x: initialTranslate.x - deltaX / videoScale, // Note the minus sign
                   y: initialTranslate.y + deltaY / videoScale
                 });
                 setDebugInfo(`📱 finger drag: (${deltaX.toFixed(0)}, ${deltaY.toFixed(0)}) zoom:${(videoScale * 100).toFixed(0)}%`);
@@ -3042,10 +3065,10 @@ export default function Home() {
             }
           }}
           onTouchMove={(e) => {
-            e.preventDefault(); // 防止页面滚动
+            e.preventDefault(); // Prevent page scrolling
             
             if (e.touches.length === 2) {
-              // 双指缩放（只有手指才能触发，Apple Pencil不会产生多点触摸）
+              // Two-finger zoom (only touch supports multi-touch)
               const touch1 = e.touches[0];
               const touch2 = e.touches[1];
               const distance = Math.sqrt(
@@ -3064,29 +3087,29 @@ export default function Home() {
                 console.log('[Zoom] 双指缩放:', newScale);
               }
             }
-            // 移除单指拖拽处理，改用PointerMove
+            // Remove single-finger drag; use PointerMove instead
           }}
           onTouchEnd={(e) => {
             if (e.touches.length === 0) {
-              // 所有手指离开
+              // All fingers lifted
               setDebugInfo(`✅ zoom: ${(videoScale * 100).toFixed(0)}%`);
             }
           }}
           className="absolute inset-0 z-10 cursor-crosshair select-none"
           style={{ 
-            touchAction: 'none', // 禁用默认触摸行为，完全自定义
+            touchAction: 'none', // Disable default touch behavior
             userSelect: 'none',
             WebkitUserSelect: 'none',
             WebkitTouchCallout: 'none',
             WebkitTapHighlightColor: 'transparent',
-            pointerEvents: 'auto' // 确保指针事件可以触发
+            pointerEvents: 'auto' // Ensure pointer events fire
           }}
           title="Use Apple Pencil to select the region"
         >
-          {/* 手指检测模式的视觉反馈 */}
+          {/* Visual feedback for finger detection mode */}
           {handDetectionMode === 'finger' && fingerTipPosition && (
             <>
-              {/* 手指指尖标记（始终显示） */}
+              {/* Fingertip marker (always visible) */}
               <div
                 className="absolute w-3 h-3 bg-red-500 rounded-full pointer-events-none border-2 border-white shadow-lg z-20"
                 style={{
@@ -3096,7 +3119,7 @@ export default function Home() {
                 }}
               />
 
-              {/* 最近 OCR 词调试标签 */}
+              {/* Debug label for nearest OCR word */}
               {debugNearestWord && (
                 <div
                   className="absolute pointer-events-none z-30 bg-black bg-opacity-75 text-white text-xs px-2 py-1 rounded shadow-lg"
@@ -3115,7 +3138,7 @@ export default function Home() {
                 </div>
               )}
               
-              {/* 长按进度圆环（仅在开启 finger long-press LLM 时显示） */}
+              {/* Long-press progress ring (only when finger long-press LLM is enabled) */}
               {isFingerLongPressLLMEnabled && longPressRef.current.startPosition && longPressState.currentDuration > 0 && (
                 <div
                   className="absolute pointer-events-none z-25"
@@ -3127,7 +3150,7 @@ export default function Home() {
                   }}
                 >
                   <svg width="50" height="50" className="transform -rotate-90">
-                    {/* 背景圆环 */}
+                    {/* Background ring */}
                     <circle
                       cx="25"
                       cy="25"
@@ -3136,7 +3159,7 @@ export default function Home() {
                       strokeWidth="3"
                       fill="none"
                     />
-                    {/* 进度圆环 */}
+                    {/* Progress ring */}
                     <circle
                       cx="25"
                       cy="25"
@@ -3155,7 +3178,7 @@ export default function Home() {
                     />
                   </svg>
                   
-                  {/* 中心级别指示器 */}
+                  {/* Center level indicator */}
                   <div
                     className="absolute inset-0 flex items-center justify-center text-white text-xs font-bold"
                     style={{
@@ -3166,7 +3189,7 @@ export default function Home() {
                      longPressState.currentLevel === 'medium' ? 'M' : 'L'}
                   </div>
                   
-                  {/* 时间显示和提示 */}
+                  {/* Time display and hint */}
                   <div
                     className="absolute -bottom-8 left-1/2 transform -translate-x-1/2 bg-black bg-opacity-70 text-white text-xs px-2 py-1 rounded whitespace-nowrap text-center"
                   >
@@ -3181,7 +3204,7 @@ export default function Home() {
                 </div>
               )}
               
-              {/* 预览选择区域（仅在开启 finger long-press LLM 时显示） */}
+              {/* Selection preview (only when finger long-press LLM is enabled) */}
               {isFingerLongPressLLMEnabled && (() => {
                 const previewArea = calculateFingerSelectionArea(fingerTipPosition);
                 return (
@@ -3199,7 +3222,7 @@ export default function Home() {
                       transition: 'border-color 0.2s ease-out'
                     }}
                   >
-                    {/* 区域标签 */}
+                    {/* Region label */}
                     <div 
                       className="absolute -top-6 left-1/2 transform -translate-x-1/2 text-white text-xs px-2 py-1 rounded whitespace-nowrap"
                       style={{
@@ -3221,10 +3244,10 @@ export default function Home() {
             </>
           )}
 
-          {/* 兴趣度检测可视化 */}
+          {/* Interest detection visualization */}
           {isInterestDetectionEnabled && (
             <>
-              {/* 移动轨迹可视化 */}
+              {/* Movement trail visualization */}
               {/* {movementTrail.length > 1 && (
                 <svg className="absolute inset-0 w-full h-full pointer-events-none z-10">
                   <path
@@ -3249,7 +3272,7 @@ export default function Home() {
                 </svg>
               )} */}
 
-              {/* 兴趣热点可视化 */}
+              {/* Interest heatmap visualization */}
               {/* {Array.from(interestHeatmap.entries()).map(([key, score]) => {
                 const [gridX, gridY] = key.split(',').map(Number);
                 const x = gridX * interestDetectionConfig.heatmapGridSize;
@@ -3273,7 +3296,7 @@ export default function Home() {
                 );
               })} */}
 
-              {/* 当前兴趣度分数显示 */}
+              {/* Current interest score display */}
               {/* {fingerTipPosition && currentInterestScore > 5 && (
                 <div
                   className="absolute pointer-events-none z-20 bg-purple-500 text-white text-xs px-2 py-1 rounded shadow-lg"
@@ -3287,7 +3310,7 @@ export default function Home() {
                 </div>
               )} */}
 
-              {/* 焦点区域高亮 */}
+              {/* Focus area highlights */}
               {/* {interestAnalysis && interestAnalysis.focusAreas.map((area, index) => (
                 <div
                   key={index}
@@ -3309,9 +3332,9 @@ export default function Home() {
             </>
           )} 
 
-          {/* Apple Pencil 绘制路径可视化 */}
+          {/* Apple Pencil drawing path visualization */}
           {handDetectionMode === 'pencil' && drawingPath.length > 1 && (() => {
-            // 计算运动距离
+            // Compute travel distance
             let distance = 0;
             for (let i = 1; i < drawingPath.length; i++) {
               const dx = drawingPath[i].x - drawingPath[i-1].x;
@@ -3319,7 +3342,7 @@ export default function Home() {
               distance += Math.sqrt(dx * dx + dy * dy);
             }
             
-            // 只有运动距离大于15px才显示路径线
+            // Show path only if distance > 15px
             return distance > 15 ? (
               <svg className="absolute inset-0 w-full h-full pointer-events-none">
                 <path
@@ -3334,7 +3357,7 @@ export default function Home() {
             ) : null;
           })()}
           
-          {/* Apple Pencil 当前绘制点显示 */}
+          {/* Apple Pencil current drawing point */}
           {handDetectionMode === 'pencil' && isPressed && drawingPath.length > 0 && (
             <div
               className="absolute w-2 h-2 bg-blue-500 rounded-full pointer-events-none"
@@ -3345,7 +3368,7 @@ export default function Home() {
             />
           )}
           
-          {/* 选择区域边界可视化 */}
+          {/* Selection bounds visualization */}
           {selectionBounds && (
             <div
               className="absolute border-2 border-blue-500 bg-blue-100 bg-opacity-20 pointer-events-none transparent"
@@ -3362,16 +3385,16 @@ export default function Home() {
           
         </div>
         
-        {/* 浮窗响应 - 移到video容器外层，避免被边框遮挡 */}
+        {/* Floating response - moved outside video container to avoid clipping */}
         {floatingResponse && (
           <div
             className="fixed z-50 select-none"
             style={{
               left: `${floatingResponse.position.x}px`,
               top: `${floatingResponse.position.y}px`,
-              transform: 'translate(-50%, -100%)', // 水平居中，垂直向上偏移
-              pointerEvents: 'auto', // 允许交互
-              width: '240px', // 固定宽度，防止拖拽时变化
+              transform: 'translate(-50%, -100%)', // Center horizontally, offset up
+              pointerEvents: 'auto', // Allow interaction
+              width: '240px', // Fixed width to avoid drag resize
               minWidth: '240px',
               maxWidth: '240px'
             }}
@@ -3421,7 +3444,7 @@ export default function Home() {
             }}
           >
             <div className="bg-black bg-opacity-90 text-white text-xs rounded-lg shadow-xl backdrop-blur-sm border border-gray-600">
-              {/* 标题栏和关闭按钮 */}
+              {/* Title bar and close button */}
               <div className="drag-handle flex justify-between items-center p-2 pb-1 cursor-move border-b border-gray-600">
                 <div className="text-gray-300 text-xs">AI Response</div>
                 <button
@@ -3436,14 +3459,14 @@ export default function Home() {
                 </button>
               </div>
               
-              {/* 内容区域 */}
+              {/* Content area */}
               <div className="p-2 pt-1">
                 <div className="whitespace-pre-wrap max-h-32 overflow-y-auto">
                   {floatingResponse.text || "正在分析..."}
                 </div>
               </div>
               
-              {/* 小箭头指向下方的选择框 */}
+              {/* Small arrow pointing to selection box */}
               <div className="absolute -bottom-1 left-1/2 transform -translate-x-1/2 w-2 h-2 bg-black bg-opacity-90 rotate-45 border-r border-b border-gray-600"></div>
             </div>
           </div>
@@ -3455,7 +3478,7 @@ export default function Home() {
         {answer || "Tap the video to OCR the region under your pen, then call LLM."}
       </div>
 
-      {/* 主页：可视区域 OCR 操作 */}
+      {/* Main page: visible-area OCR actions */}
       <div className="mt-4 flex gap-2 flex-wrap">
         <button
           onClick={runRegionOCR}
@@ -3463,6 +3486,22 @@ export default function Home() {
           style={{ background: '#111827' }}
         >
           OCR Region (Whole Frame)
+        </button>
+        <button
+          onClick={() => {
+            sessionLogger.reset();
+            sessionLogger.resetSessionIds();
+            setPageIndex(1);
+          }}
+          className="px-3 py-2 rounded-md border"
+        >
+          重置Session IDs
+        </button>
+        <button
+          onClick={resetSessionForNewPage}
+          className="px-3 py-2 rounded-md border"
+        >
+          New Page (Reset Logs)
         </button>
         <button
           onClick={clearRegionOCR}
@@ -3473,7 +3512,7 @@ export default function Home() {
         </button>
       </div>
 
-      {/* Region OCR 调试：仅展示 OCR Region 按钮触发时送入OCR的图片和识别文本 */}
+      {/* Region OCR debug: show image/text from OCR Region button */}
       {(regionCapturedImage || regionRecognizedText) && (
         <div className="mt-2 p-3 rounded-lg border bg-white max-w-md">
           <div className="font-medium mb-2">🧪 Region OCR Debug</div>
@@ -3503,7 +3542,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* 显示捕获的图像 */}
+      {/* Show captured image */}
       {capturedImage && (
         <div className="mt-4 p-3 rounded-lg border bg-white max-w-md">
           <div className="font-medium mb-2">📸 Captured Image (for OCR)</div>
@@ -3525,7 +3564,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* Topic 选择 toast */}
+      {/* Topic selection toast */}
       {lastSelectedTopic && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50">
           <div className="px-3 py-2 rounded-full bg-black bg-opacity-80 text-white text-xs shadow-lg">
@@ -3533,12 +3572,19 @@ export default function Home() {
           </div>
         </div>
       )}
+      {downloadToast && (
+        <div className="fixed bottom-12 left-1/2 -translate-x-1/2 z-50">
+          <div className="px-3 py-2 rounded-full bg-emerald-600 text-white text-xs shadow-lg">
+            {downloadToast}
+          </div>
+        </div>
+      )}
 
-      {/* 话题选择 + 语音记录 浮窗（不遮挡主图像区域，支持折叠） */}
-      <div className="fixed right-4 top-24 z-40 pointer-events-none">
-        <div className="pointer-events-auto w-72 max-w-[80vw] bg-white/90 border border-gray-200 rounded-xl shadow-xl backdrop-blur-sm overflow-hidden">
+      {/* Topics + voice notes floating panel (non-blocking, collapsible) */}
+      <div className="fixed right-4 top-1 z-40 pointer-events-none">
+        <div className="pointer-events-auto w-72 max-w-[80vw] max-h-[calc(100vh-6rem)] bg-white/90 border border-gray-200 rounded-xl shadow-xl backdrop-blur-sm overflow-hidden flex flex-col">
           <div
-            className="flex items-center justify-between px-3 py-2 border-b border-gray-200 bg-gray-50 cursor-pointer"
+            className="flex items-center justify-between px-3 py-2 border-b border-gray-200 bg-gray-50 cursor-pointer flex-shrink-0"
             onClick={() => setIsTopicsPanelOpen((v) => !v)}
           >
             <div className="flex flex-col">
@@ -3558,8 +3604,8 @@ export default function Home() {
           </div>
 
           {isTopicsPanelOpen && (
-            <div className="p-3 space-y-3 max-h-[60vh] overflow-y-auto">
-              {/* Topics 列表 */}
+            <div className="p-3 space-y-3 overflow-y-auto flex-1">
+              {/* Topics list */}
               <div className="text-[11px] text-gray-800">
                 <div className="font-medium mb-1 flex items-center justify-between">
                   <span>Topics (for recommender)</span>
@@ -3627,7 +3673,7 @@ export default function Home() {
                   onAnnotation={(ann) => {
                     sessionLogger.addVoiceAnnotation(ann);
                     setLastVoiceAnnotation(ann);
-                    // 同时将语音内容作为一个“选定的 topic”记录下来
+                    // Also record voice transcript as a selected topic
                     if (ann.transcript && ann.transcript.trim()) {
                       sessionLogger.addSelectedTopic({
                         id: `voice-topic-${ann.timestampStart}-${Math.random()
@@ -3648,7 +3694,7 @@ export default function Home() {
         </div>
       </div>
 
-      {/* 测试按钮 */}
+      {/* Test buttons */}
       <div className="mt-4 flex gap-2 flex-wrap">
         <button
           onClick={async () => {
@@ -3659,7 +3705,7 @@ export default function Home() {
               return;
             }
             
-            // 创建一个测试图片（纯白背景黑字）
+            // Create a test image (white background, black text)
             const canvas = document.createElement("canvas");
             canvas.width = 300;
             canvas.height = 100;
@@ -3698,7 +3744,7 @@ export default function Home() {
           onClick={() => {
             setDebugInfo('');
             setAnswer('');
-            setFloatingResponse(null); // 清除浮窗
+            setFloatingResponse(null); // Clear floating panel
             console.log('[Test] 清除调试信息');
           }}
           className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 text-sm"
@@ -3740,7 +3786,7 @@ export default function Home() {
         )}
       </div>
 
-      {/* iPad 事件测试区域 */}
+      {/* iPad event test area */}
       {/* <div className="mt-4 p-4 border border-dashed border-gray-300 rounded-lg bg-yellow-50">
         <div className="text-sm font-medium mb-2"> iPad 事件测试区域</div>
         <div
@@ -3776,7 +3822,7 @@ export default function Home() {
 
  
 
-      {/* 显示WebGL测试截图 */}
+      {/* Show WebGL test screenshot */}
       {webglScreenshot && (
         <div className="mt-4 p-3 rounded-lg border bg-white max-w-md">
           <div className="font-medium mb-2">🎮 Three.js 3D渲染截图</div>

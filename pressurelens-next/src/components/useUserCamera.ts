@@ -9,14 +9,14 @@ export type UseUserCameraResult = {
   stop: () => void;
 };
 
-// 复用 page.tsx 的摄像头约束：用户前摄 + 高分辨率 + 30fps + 方形优先
+// Reuse camera constraints from page.tsx: front camera + high-res + 30fps + square preferred
 const DEFAULT_CONSTRAINTS: MediaStreamConstraints = {
   video: {
     facingMode: { ideal: "user" },
     width: { ideal: 19200, min: 1280 },
     height: { ideal: 10800, min: 720 },
     frameRate: { ideal: 30, min: 15 },
-    // 更好画质（参考现有实现）
+    // Better quality (matches existing setup)
     aspectRatio: { ideal: 1 },
   },
   audio: false,
@@ -52,7 +52,7 @@ export function useUserCamera(
     })();
     return () => {
       cancelled = true;
-      // 清理流
+      // Clean up stream
       if (streamRef.current) {
         for (const track of streamRef.current.getTracks()) {
           try {

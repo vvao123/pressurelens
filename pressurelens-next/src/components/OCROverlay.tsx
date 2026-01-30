@@ -17,7 +17,7 @@ export default function OCROverlay() {
   const [H, setH] = useState<{ M: any; Minv: any } | null>(null);
   const [cvReady, setCvReady] = useState<boolean>(false);
 
-  // 动态加载 OpenCV.js
+  // Dynamically load OpenCV.js
   useEffect(() => {
     if (isCVReady()) { setCvReady(true); return; }
     const script = document.createElement("script");
@@ -82,7 +82,7 @@ export default function OCROverlay() {
     const c = canvasRef.current!;
     const v = videoRef.current!;
     const rect = c.getBoundingClientRect();
-    // 画布是镜像显示（scaleX(-1)），坐标需反镜像回原始像素系
+    // Canvas is mirrored (scaleX(-1)); unmirror coordinates back to video pixels
     const xDisplay = e.clientX - rect.left;
     const yDisplay = e.clientY - rect.top;
     const xMirrored = c.width - xDisplay;
@@ -111,14 +111,14 @@ export default function OCROverlay() {
     }
   }, [refPts, curPts, cvReady]);
 
-  // 绘制 overlay（镜像显示）
+  // Draw overlay (mirrored)
   useEffect(() => {
     let raf = 0;
     const draw = () => {
       const v = videoRef.current;
       const c = canvasRef.current;
       if (!v || !c) { raf = requestAnimationFrame(draw); return; }
-      // 同步尺寸
+      // Sync size
       const displayWidth = v.clientWidth;
       const displayHeight = v.clientHeight;
       if (displayWidth === 0 || displayHeight === 0) { raf = requestAnimationFrame(draw); return; }
@@ -127,16 +127,16 @@ export default function OCROverlay() {
       const ctx = c.getContext("2d")!;
       ctx.clearRect(0, 0, c.width, c.height);
 
-      // 将视频原始像素 → 画布显示像素的缩放
+      // Scale from video pixels to canvas pixels
       const scaleX = v.videoWidth ? c.width / v.videoWidth : 1;
       const scaleY = v.videoHeight ? c.height / v.videoHeight : 1;
 
       ctx.save();
-      // 画布镜像以匹配视频的 scaleX(-1)
+      // Mirror canvas to match video scaleX(-1)
       ctx.scale(-1, 1);
       ctx.translate(-c.width, 0);
 
-      // 绘制 OCR 框
+      // Draw OCR boxes
       ctx.lineWidth = 1.5;
       ctx.strokeStyle = "rgba(0,0,0,0.9)";
       ctx.fillStyle = "rgba(255,255,0,0.18)";
@@ -159,7 +159,7 @@ export default function OCROverlay() {
         }
       }
 
-      // 绘制标定点
+      // Draw calibration points
       const drawPts = (pts: Point[], color: string) => {
         ctx.fillStyle = color;
         for (const p of pts) {

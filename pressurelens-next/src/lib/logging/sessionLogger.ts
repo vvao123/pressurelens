@@ -1,3 +1,4 @@
+import JSZip from "jszip";
 import type {
   PointerSample,
   PointerSampleInput,
@@ -11,16 +12,44 @@ let pointerSamples: PointerSample[] = [];
 let voiceAnnotations: VoiceAnnotation[] = [];
 let pageOcr: PageOcrInfo | undefined;
 let selectedTopics: SelectedTopic[] = [];
+let voiceAudio: Record<string, { blob: Blob; type: string }> = {};
 
-const sessionId = (() => {
+const makeSessionId = (prefix: string) => {
   const t = Date.now();
   const r = Math.floor(Math.random() * 1e6)
     .toString()
     .padStart(6, "0");
-  return `session-${t}-${r}`;
-})();
+  return `${prefix}-${t}-${r}`;
+};
 
-const startedAt = Date.now();
+const formatOcrDateTime = (timeMs: number) => {
+  const d = new Date(timeMs);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}-${hh}${mi}${ss}`;
+};
+
+const makeGlobalSessionId = () => `ocr-${formatOcrDateTime(Date.now())}`;
+
+const getAudioExtension = (mimeType: string) => {
+  if (mimeType.includes("webm")) return "webm";
+  if (mimeType.includes("ogg")) return "ogg";
+  if (mimeType.includes("mp3") || mimeType.includes("mpeg")) return "mp3";
+  if (mimeType.includes("wav")) return "wav";
+  if (mimeType.includes("m4a") || mimeType.includes("mp4")) return "m4a";
+  return "webm";
+};
+
+let sessionId = makeSessionId("session");
+let globalSessionId = makeGlobalSessionId();
+
+let pageIndex = 1;
+
+let startedAt = Date.now();
 
 const config = {
   samplingHz: 10,
@@ -55,8 +84,18 @@ export const sessionLogger = {
     selectedTopics.push(topic);
   },
 
+  addVoiceAudio(id: string, blob: Blob) {
+    if (!id || !blob || blob.size === 0) return;
+    voiceAudio[id] = { blob, type: blob.type || "audio/webm" };
+  },
+
   setPageOcr(info: PageOcrInfo) {
     pageOcr = info;
+  },
+
+  setPageIndex(index: number) {
+    if (!Number.isFinite(index)) return;
+    pageIndex = Math.max(1, Math.floor(index));
   },
 
   getSummary() {
@@ -69,12 +108,14 @@ export const sessionLogger = {
     };
   },
 
-  exportJson(deviceInfo?: string) {
+  async exportJson(deviceInfo?: string) {
     if (typeof window === "undefined") return;
 
     const endedAt = Date.now();
     const payload: SessionJson = {
       sessionId,
+      globalSessionId,
+      pageIndex,
       startedAt,
       endedAt,
       deviceInfo,
@@ -85,13 +126,21 @@ export const sessionLogger = {
       selectedTopics,
     };
 
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    const jsonBlob = new Blob([JSON.stringify(payload, null, 2)], {
       type: "application/json",
     });
-    const url = URL.createObjectURL(blob);
+    const zip = new JSZip();
+    const baseName = `${globalSessionId}-page-${pageIndex}`;
+    zip.file(`${baseName}.json`, jsonBlob);
+    Object.entries(voiceAudio).forEach(([id, { blob, type }]) => {
+      const ext = getAudioExtension(type);
+      zip.file(`audio/${id}.${ext}`, blob);
+    });
+    const zipBlob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(zipBlob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${sessionId}.json`;
+    a.download = `${baseName}.zip`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -103,6 +152,19 @@ export const sessionLogger = {
     voiceAnnotations = [];
     pageOcr = undefined;
     selectedTopics = [];
+    voiceAudio = {};
+  },
+
+  resetSessionIds(options?: { resetGlobal?: boolean; resetPageIndex?: boolean }) {
+    const { resetGlobal = true, resetPageIndex = true } = options ?? {};
+    sessionId = makeSessionId("session");
+    if (resetGlobal) {
+      globalSessionId = makeGlobalSessionId();
+    }
+    if (resetPageIndex) {
+      pageIndex = 1;
+    }
+    startedAt = Date.now();
   },
 };
 

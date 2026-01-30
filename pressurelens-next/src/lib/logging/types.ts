@@ -2,12 +2,12 @@ export type InputMode = "pencil" | "finger";
 
 export type NearestWordLineContext = {
   /**
-   * 每一行的词文本列表，按从上到下、从左到右的顺序。
-   * 例如 linesText[i] 就是第 i 行的 w.original.text 列表。
+   * Word text list for each line, ordered top-to-bottom and left-to-right.
+   * For example, linesText[i] is the w.original.text list for line i.
    */
   linesText: string[][];
   /**
-   * bestLineIndex 指向 linesText 里哪一行是“最佳行”。
+   * bestLineIndex points to the "best line" within linesText.
    */
   bestLineIndex: number;
 };
@@ -17,8 +17,8 @@ export type NearestWordInfo = {
   bbox: { x: number; y: number; w: number; h: number };
   distance: number;
   /**
-   * 指读时的行上下文信息，包括所有行的 w.original.text 列表和最佳行索引。
-   * 仅在通过 getNearestOcrWord 计算时提供，其他场景可为空。
+   * Line context during pointing: all lines' w.original.text lists and the best line index.
+   * Only provided when computed via getNearestOcrWord; otherwise can be empty.
    */
   lineContext?: NearestWordLineContext;
 };
@@ -68,6 +68,8 @@ export type SessionConfig = {
 
 export type SessionJson = {
   sessionId: string;
+  globalSessionId: string;
+  pageIndex: number;
   startedAt: number;
   endedAt?: number;
   deviceInfo?: string;

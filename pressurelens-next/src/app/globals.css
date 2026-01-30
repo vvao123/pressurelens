@@ -25,7 +25,7 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
-/* 手指检测模式的动画效果 */
+/* Animation for finger detection mode */
 @keyframes pulse {
   0%, 100% {
     opacity: 1;
@@ -46,19 +46,19 @@ body {
   }
 }
 
-/* 手指指尖的脉冲动画 */
+/* Fingertip pulse animation */
 .finger-tip {
   animation: fingerPulse 2s infinite;
 }
 
-/* 选择区域的边框动画 */
+/* Selection area border animation */
 .selection-area {
   animation: pulse 2s infinite;
   border-style: dashed;
   border-width: 2px;
 }
 
-/* 连接线的移动动画 */
+/* Connection line motion animation */
 .connection-line {
   stroke-dasharray: 5,5;
   animation: dash 1s linear infinite;

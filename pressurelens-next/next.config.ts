@@ -2,11 +2,11 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
    eslint: {
-      // 让 Vercel 的 next build 不因为 ESLint 报错而失败
+      // Prevent Vercel next build from failing on ESLint errors
       ignoreDuringBuilds: true,
     },
-   // 允许从这些“开发访问域名”加载开发资产（HMR、/_next/* 等）
-   allowedDevOrigins: ['*.trycloudflare.com'], // 你现在用的 cloudflared 隧道
+   // Allow loading dev assets (HMR, /_next/*, etc.) from these dev origins
+   allowedDevOrigins: ['*.trycloudflare.com'], // Current cloudflared tunnel
 };
 
 

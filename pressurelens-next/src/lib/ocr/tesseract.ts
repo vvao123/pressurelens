@@ -3,7 +3,7 @@ export type WordBBox = {
   bbox: { x: number; y: number; w: number; h: number };
 };
 
-// 动态加载，避免 SSR 触发
+// Lazy-load to avoid SSR issues
 export async function recognizeWordsFromCanvas(
   canvas: HTMLCanvasElement,
   lang: string = "eng"

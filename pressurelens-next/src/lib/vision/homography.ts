@@ -1,7 +1,7 @@
 export type Point = { x: number; y: number };
 export type Rect = { x: number; y: number; w: number; h: number };
 
-declare const cv: any; // OpenCV.js 全局
+declare const cv: any; // OpenCV.js global
 
 export function isCVReady(): boolean {
   return typeof (globalThis as any).cv !== "undefined" && !!cv?.Mat;
@@ -9,7 +9,7 @@ export function isCVReady(): boolean {
 
 export type HomographyPair = { M: any; Minv: any } | null;
 
-// 计算 curr(当前帧) → ref(参考帧) 的单应，并返回 M 与 Minv
+// Compute homography from curr (current frame) to ref (reference frame), return M and Minv
 export function computeHomography(curr: Point[], ref: Point[]): HomographyPair {
   if (!isCVReady()) return null;
   if (curr.length !== 4 || ref.length !== 4) return null;
@@ -25,7 +25,7 @@ export function computeHomography(curr: Point[], ref: Point[]): HomographyPair {
     srcMat = cv.matFromArray(4, 1, cv.CV_32FC2, srcArr);
     dstMat = cv.matFromArray(4, 1, cv.CV_32FC2, dstArr);
     M = cv.getPerspectiveTransform(srcMat, dstMat);
-    // 反变换：ref → curr
+    // Inverse transform: ref → curr
     const tmpInv = cv.getPerspectiveTransform(dstMat, srcMat);
     Minv = tmpInv;
   } catch {
@@ -56,7 +56,7 @@ export function computeHomography(curr: Point[], ref: Point[]): HomographyPair {
 
 export function applyHomographyToPoint(H: any, p: Point): Point {
   const denom = H.data64F ? H.data64F : H.data32F;
-  // 手动乘以 3x3 矩阵（OpenCV.js 不直接提供单点接口）
+  // Manually multiply by 3x3 matrix (OpenCV.js has no single-point API)
   const m = denom as Float64Array | Float32Array;
   const x = p.x, y = p.y;
   const w = m[6] * x + m[7] * y + m[8];
