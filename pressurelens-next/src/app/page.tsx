@@ -26,6 +26,10 @@ export default function Home() {
   const [warpCompensation, setWarpCompensation] = useState<number>(0.5); // Suggested range 0~0.5, 0 disables
   // Keep latest warpCompensation in ref to avoid stale closures in MediaPipe callbacks
   const warpCompensationRef = useRef<number>(warpCompensation);
+
+  // Fingertip visual compensation strength (for MediaPipe marker alignment)
+  const [fingerCompStrength, setFingerCompStrength] = useState<number>(0.057);
+  const fingerCompStrengthRef = useRef<number>(fingerCompStrength);
   // Keep finger long-press LLM toggle in ref to avoid stale closures in MediaPipe callbacks
   const isFingerLongPressLLMEnabledRef = useRef<boolean>(true);
   const offscreenRendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -220,18 +224,22 @@ export default function Home() {
   // Hand detection state
   const [handResults, setHandResults] = useState<any>(null); // MediaPipe detection results
   const [fingerTipPosition, setFingerTipPosition] = useState<{x: number, y: number} | null>(null); // Fingertip position
-  const [isHandDetectionEnabled, setIsHandDetectionEnabled] = useState<boolean>(false); // Enable hand detection
-  const [handDetectionMode, setHandDetectionMode] = useState<'pencil' | 'finger'>('pencil'); // Input mode
+  const [isHandDetectionEnabled, setIsHandDetectionEnabled] = useState<boolean>(true); // Enable hand detection
+  const [handDetectionMode, setHandDetectionMode] = useState<'pencil' | 'finger'>('finger'); // Input mode
   const [handsInstance, setHandsInstance] = useState<any>(null); // MediaPipe Hands instance
   
   // User interest detection state
-  const [isInterestDetectionEnabled, setIsInterestDetectionEnabled] = useState<boolean>(false); // Enable interest detection
+  const [isInterestDetectionEnabled, setIsInterestDetectionEnabled] = useState<boolean>(true); // Enable interest detection
   const [movementTrail, setMovementTrail] = useState<Array<{x: number, y: number, timestamp: number, speed: number}>>([]); // Movement trail
 
   // Sync warpCompensation to ref for MediaPipe callbacks and Three.js projection
   useEffect(() => {
     warpCompensationRef.current = warpCompensation;
   }, [warpCompensation]);
+
+  useEffect(() => {
+    fingerCompStrengthRef.current = fingerCompStrength;
+  }, [fingerCompStrength]);
   const [interestHeatmap, setInterestHeatmap] = useState<Map<string, number>>(new Map()); // Interest heatmap
   const [currentInterestScore, setCurrentInterestScore] = useState<number>(0); // Current interest score
   const [detectedKeywords, setDetectedKeywords] = useState<string[]>([]); // Detected keywords
@@ -406,7 +414,7 @@ export default function Home() {
   };
 
   // Finger mode: toggle long-press LLM
-  const [isFingerLongPressLLMEnabled, setIsFingerLongPressLLMEnabled] = useState<boolean>(true);
+  const [isFingerLongPressLLMEnabled, setIsFingerLongPressLLMEnabled] = useState<boolean>(false);
   // Sync finger long-press LLM toggle to ref for MediaPipe callbacks
   useEffect(() => {
     isFingerLongPressLLMEnabledRef.current = isFingerLongPressLLMEnabled;
@@ -414,7 +422,49 @@ export default function Home() {
 
   // Training topic selection (for toast display)
   const [lastSelectedTopic, setLastSelectedTopic] = useState<string | null>(null);
+  const topicMeaningCacheRef = useRef<Map<string, string>>(new Map());
+  const topicMeaningInFlightRef = useRef<Set<string>>(new Set());
   const [downloadToast, setDownloadToast] = useState<string | null>(null);
+
+  const explainTopicMeaning = async (topicText: string) => {
+    const t = topicText.trim();
+    if (!t) return;
+    // simple cache by exact text
+    const cached = topicMeaningCacheRef.current.get(t);
+    if (cached) {
+      setAnswer(`topic: ${t}\n\n${cached}`);
+      return;
+    }
+    if (topicMeaningInFlightRef.current.has(t)) return;
+    topicMeaningInFlightRef.current.add(t);
+    try {
+      setAnswer(`topic: ${t}\n\n generating meaning...`);
+      const resp = await fetch("/api/llm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: `${t}\n\nPlease explain the meaning of this topic in one sentence.`,
+          level: "light",
+          streaming: false,
+        }),
+      });
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => "");
+        console.error("[TopicMeaning] /api/llm error", resp.status, txt);
+        return;
+      }
+      const data = await resp.json();
+      const content: string = data?.content || "";
+      if (content) {
+        topicMeaningCacheRef.current.set(t, content);
+        setAnswer(`topic: ${t}\n\n${content}`);
+      }
+    } catch (e) {
+      console.error("[TopicMeaning] unexpected error", e);
+    } finally {
+      topicMeaningInFlightRef.current.delete(t);
+    }
+  };
 
   // Interest detection config
   const interestDetectionConfig = {
@@ -1197,8 +1247,12 @@ export default function Home() {
               // - Lower positions look stretched by perspective/warp; marker appears mid-nail
               // Apply a downward offset that grows with y, only for fingerTipPosition
               // (does not affect video or capture region).
-              const fingerCompStrength = 0.05; // Tunable: 0.03~0.08
-              const extraY = fingerCompStrength * (-fingerTip.y) * containerRect.height;
+              // const extraY = fingerCompStrengthRef.current * (-fingerTip.y) * containerRect.height;
+              // Scale compensation with current zoom (mesh scale) so it stays consistent after pinch-zoom
+              const zoomFactor = threeMeshRef.current?.scale?.y ?? 1;
+              console.log('zoomFactor', zoomFactor);
+              const extraY =
+                fingerCompStrengthRef.current * (-fingerTip.y) * containerRect.height * zoomFactor;
               y += extraY;
 
               // === Fingertip smoothing: low-pass + small jitter dead zone ===
@@ -2635,47 +2689,7 @@ export default function Home() {
         </span>
       </div>
 
-      {/* Interest analysis results */}
-      {isInterestDetectionEnabled && interestAnalysis && (
-        <div className="mb-3 p-3 bg-purple-50 rounded-lg border border-purple-200">
-          {/* <div className="text-sm text-purple-700 mb-2">
-            🎯 兴趣度分析结果
-          </div>
-          <div className="text-xs text-gray-600 space-y-1">
-            <div>总兴趣度分数: {interestAnalysis.totalInterestScore.toFixed(1)}%</div>
-            <div>平均移动速度: {interestAnalysis.averageSpeed.toFixed(2)} px/ms</div>
-            <div>焦点区域数量: {interestAnalysis.focusAreas.length}</div>
-            <div>轨迹点数: {movementTrail.length}</div>
-            <div>热点区域数: {interestHeatmap.size}</div>
-            {interestAnalysis.topKeywords.length > 0 && (
-              <div>
-                热门关键词: {interestAnalysis.topKeywords.map(k => k.keyword).join(', ')}
-              </div>
-            )}
-          </div> */}
-          
-          {/* Interest trend chart */}
-          {/* <div className="mt-2">
-            <div className="text-xs text-purple-600 mb-1">兴趣度趋势:</div>
-            <div className="flex items-end space-x-1 h-8">
-              {movementTrail.slice(-20).map((point, index) => {
-                const height = Math.min((point.speed > 0 ? 100 / (point.speed + 1) : 50) / 10, 8);
-                return (
-                  <div
-                    key={index}
-                    className="bg-purple-400 rounded-t"
-                    style={{
-                      width: '3px',
-                      height: `${height}px`,
-                      opacity: 0.8 - (index * 0.03)
-                    }}
-                  />
-                );
-              })}
-            </div>
-          </div> */}
-        </div>
-      )}
+
 
       {/* Finger detection status */}
       {/* {handDetectionMode === 'finger' && (
@@ -2916,6 +2930,33 @@ export default function Home() {
         </div>
         <span className="text-xs text-gray-500">
         </span>
+      </div>
+
+      {/* Fingertip compensation control */}
+      <div className="mb-3 flex gap-2 items-center">
+        <span className="text-sm text-gray-600">fingertip comp:</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">0</span>
+          <input
+            type="range"
+            min="0"
+            max="0.12"
+            step="0.005"
+            value={fingerCompStrength}
+            onChange={(e) => setFingerCompStrength(parseFloat(e.target.value))}
+            className="w-32 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
+            style={{
+              background: `linear-gradient(to right, #10b981 0%, #10b981 ${Math.min(
+                100,
+                (fingerCompStrength / 0.12) * 100
+              )}%, #e5e7eb ${Math.min(100, (fingerCompStrength / 0.12) * 100)}%, #e5e7eb 100%)`,
+            }}
+          />
+          <span className="text-xs text-gray-500">0.12</span>
+          <span className="text-xs font-medium text-emerald-600 min-w-[3rem]">
+            {fingerCompStrength.toFixed(3)}
+          </span>
+        </div>
       </div>
 
       {/* Perspective strength control */}
@@ -3639,6 +3680,7 @@ export default function Home() {
                             source: "page_topic",
                           });
                           setLastSelectedTopic(t.text);
+                          explainTopicMeaning(t.text);
                           setTimeout(() => setLastSelectedTopic(null), 1500);
                         }}
                         className="px-2 py-1 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 text-[11px]"
@@ -3675,15 +3717,17 @@ export default function Home() {
                     setLastVoiceAnnotation(ann);
                     // Also record voice transcript as a selected topic
                     if (ann.transcript && ann.transcript.trim()) {
+                      const topicText = ann.transcript.trim();
                       sessionLogger.addSelectedTopic({
                         id: `voice-topic-${ann.timestampStart}-${Math.random()
                           .toString(36)
                           .slice(2, 6)}`,
                         timestamp: ann.timestampEnd,
-                        text: ann.transcript.trim(),
+                        text: topicText,
                         source: "voice",
                       });
-                      setLastSelectedTopic(ann.transcript.trim());
+                      setLastSelectedTopic(topicText);
+                      explainTopicMeaning(topicText);
                       setTimeout(() => setLastSelectedTopic(null), 1500);
                     }
                   }}

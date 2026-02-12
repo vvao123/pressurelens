@@ -23,7 +23,8 @@ export async function POST(req: Request) {
     const fd = new FormData();
     fd.append("file", audio);
     fd.append("model", "whisper-1");
-    fd.append("response_format", "json");
+    // Use verbose_json so we can get segment timestamps to estimate wake word timing
+    fd.append("response_format", "verbose_json");
 
     const r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
@@ -47,8 +48,9 @@ export async function POST(req: Request) {
 
     const data = await r.json();
     const transcript: string = data.text || "";
+    const segments = Array.isArray(data.segments) ? data.segments : undefined;
 
-    return new Response(JSON.stringify({ transcript }), {
+    return new Response(JSON.stringify({ transcript, segments }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });

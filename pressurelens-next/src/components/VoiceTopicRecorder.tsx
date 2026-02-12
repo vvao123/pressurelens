@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { sessionLogger } from "../lib/logging/sessionLogger";
-import type { VoiceAnnotation } from "../lib/logging/types";
+import type { RejectedVoiceAnnotation, VoiceAnnotation } from "../lib/logging/types";
 
 type Props = {
   onAnnotation: (ann: VoiceAnnotation) => void;
@@ -30,7 +30,7 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
   const hasSpeechRef = useRef<boolean>(false);
   const chunksRef = useRef<Blob[]>([]);
   const startTimeRef = useRef<number>(0);
-  const queuedChunkRef = useRef<{ blob: Blob; start: number; end: number } | null>(null);
+  const queuedChunkRef = useRef<Array<{ blob: Blob; start: number; end: number }>>([]);
   const recordingModeRef = useRef<"manual" | "continuous" | null>(null);
   const lastActivationAtRef = useRef<number>(0);
   const isTranscribingRef = useRef<boolean>(false);
@@ -51,7 +51,7 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
     if (clearMode) {
       recordingModeRef.current = null;
     }
-    queuedChunkRef.current = null;
+    queuedChunkRef.current = [];
     if (continuousTimerRef.current) {
       clearTimeout(continuousTimerRef.current);
       continuousTimerRef.current = null;
@@ -118,11 +118,74 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
       .toLowerCase()
       .replace(/[\s.,!?，。！？、:;'"“”‘’()[\]{}<>-]/g, "");
 
+  const findWakeWordDetectedAt = (
+    segments: any[] | undefined,
+    phrase: string,
+    timestampStart: number
+  ): number | undefined => {
+    if (!segments || !Array.isArray(segments)) return undefined;
+    const np = normalizeForMatch(phrase);
+    if (!np) return undefined;
+    for (const seg of segments) {
+      const t = typeof seg?.text === "string" ? seg.text : "";
+      const ns = normalizeForMatch(t);
+      if (!ns || !ns.includes(np)) continue;
+      const startSec = typeof seg?.start === "number" ? seg.start : undefined;
+      if (startSec === undefined) return undefined;
+      const endSec = typeof seg?.end === "number" ? seg.end : undefined;
+      const idx = ns.indexOf(np);
+      // If we have segment end and can locate the wake word position, estimate within the segment.
+      // This avoids the common case where Whisper returns a single segment starting at 0.
+      if (endSec !== undefined && endSec > startSec && idx >= 0 && ns.length > 0) {
+        const rel = idx / ns.length;
+        const estSec = startSec + rel * (endSec - startSec);
+        return timestampStart + Math.max(0, Math.floor(estSec * 1000));
+      }
+      return timestampStart + Math.max(0, Math.floor(startSec * 1000));
+        }
+    return undefined;
+      };
+
+  const cleanAfterWakeWord = (
+    raw: string,
+    phrase: string
+  ): { cleaned: string; wakeTokenStartIndex: number; wakeTokenEndIndex: number } | null => {
+    const p = phrase.trim();
+    if (!p) return null;
+    const rawLower = raw.toLowerCase();
+    const pLower = p.toLowerCase();
+    const idx = rawLower.indexOf(pLower);
+    if (idx < 0) return null;
+
+    // Remove the token that CONTAINS the phrase (e.g. intention -> remove "intentional"),
+    // and remove everything BEFORE it as well.
+    const isAsciiWake = /^[a-z0-9_]+$/.test(normalizeForMatch(p));
+    let cutEnd = idx + p.length;
+    let tokenStart = idx;
+    if (isAsciiWake) {
+      const isWordChar = (ch: string) => /[a-z0-9_]/.test(ch);
+      // expand to token boundaries on original string
+      let s = idx;
+      while (s > 0 && isWordChar(rawLower[s - 1])) s -= 1;
+      let e = idx + p.length;
+      while (e < rawLower.length && isWordChar(rawLower[e])) e += 1;
+      tokenStart = s;
+      cutEnd = e;
+    }
+
+    let out = raw.slice(cutEnd);
+    out = out.replace(/^[\s.,!?，。！？、:;'"“”‘’()[\]{}<>-]+/, "");
+    out = out.trim();
+    if (!out) return null;
+    return { cleaned: out, wakeTokenStartIndex: tokenStart, wakeTokenEndIndex: cutEnd };
+  };
+
   const handleTranscript = (
     transcript: string,
     timestampStart: number,
     timestampEnd: number,
-    blob?: Blob
+    blob?: Blob,
+    segments?: any[]
   ) => {
     if (!transcript) return;
     const isContinuousMode = recordingModeRef.current === "continuous";
@@ -149,23 +212,59 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
     const hasActivation =
       normalizedPhrase.length > 0 && normalizedTranscript.includes(normalizedPhrase);
     if (isContinuousMode && !hasActivation) {
-      setLastListenStatus("wake word not detected");
-      return;
-    }
+      // Save for later audit (to catch STT misses of the wake word).
+      setLastTranscriptRaw(transcript);
+      setLastTranscript(transcript);
+      setLastListenStatus("wake word not detected (saved for review)");
+      if (blob) {
+        const rej: RejectedVoiceAnnotation = {
+          id: `voice-rejected-${timestampStart}-${Math.random().toString(36).slice(2, 8)}`,
+          timestampStart,
+          timestampEnd,
+          transcript,
+          rejectedReason: "wake_word_not_detected",
+          wakeWord: phrase,
+        };
+        sessionLogger.addRejectedVoiceAnnotation(rej);
+        sessionLogger.addRejectedVoiceAudio(rej.id, blob);
+      }
+          return;
+        }
 
     const now = Date.now();
     if (isContinuousMode && now - lastActivationAtRef.current < 3000) return;
     if (isContinuousMode) lastActivationAtRef.current = now;
 
-    const cleaned = hasActivation
-      ? transcript.replace(new RegExp(phrase, "ig"), "").trim()
-      : transcript.trim();
-    let finalTranscript = cleaned || transcript;
+    const rawTranscript = transcript;
+    let finalTranscript = transcript.trim();
     if (hasActivation) {
-      const trimmed = finalTranscript.trim();
-      if (!trimmed) return;
-      finalTranscript = trimmed.replace(/^[\s.,!?，。！？、:;'"“”‘’()[\]{}<>-]+/, "");
-      if (!finalTranscript) return;
+      const cleaned = cleanAfterWakeWord(rawTranscript, phrase);
+      if (!cleaned) return;
+      finalTranscript = cleaned.cleaned;
+    }
+
+    const computedWakeAt =
+      hasActivation
+        ? findWakeWordDetectedAt(segments, phrase, timestampStart) ?? timestampEnd
+        : undefined;
+
+    if (hasActivation && isContinuousMode) {
+      // Debug wake timing: compare computed wake timestamp vs chunk start/end.
+      console.debug("[VoiceTopicRecorder][wake]", {
+        phrase,
+        timestampStart,
+        timestampEnd,
+        computedWakeAt,
+        deltaFromStartMs: computedWakeAt ? computedWakeAt - timestampStart : null,
+        deltaToEndMs: computedWakeAt ? timestampEnd - computedWakeAt : null,
+        segmentsPreview: Array.isArray(segments)
+          ? segments.slice(0, 6).map((s: any) => ({
+              start: s?.start,
+              end: s?.end,
+              text: s?.text,
+            }))
+          : null,
+      });
     }
 
     const ann: VoiceAnnotation = {
@@ -173,6 +272,8 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
       timestampStart,
       timestampEnd,
       transcript: finalTranscript,
+      rawTranscript,
+      ...(hasActivation ? { wakeWordDetectedAt: computedWakeAt } : {}),
     };
     if (blob) {
       pendingAudioBlobRef.current = blob;
@@ -199,36 +300,38 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
     if (blob.size === 0) return;
     isTranscribingRef.current = true;
     setIsTranscribing(true);
-    try {
-      const file = new File([blob], "speech.webm", { type: blob.type });
-      const form = new FormData();
-      form.append("audio", file);
+        try {
+          const file = new File([blob], "speech.webm", { type: blob.type });
+          const form = new FormData();
+          form.append("audio", file);
 
-      const res = await fetch("/api/voice-stt", {
-        method: "POST",
-        body: form,
-      });
+          const res = await fetch("/api/voice-stt", {
+            method: "POST",
+            body: form,
+          });
 
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        console.error("[VoiceTopicRecorder] /api/voice-stt error", res.status, txt);
-        setError(`STT error: ${res.status}`);
-        return;
-      }
+          if (!res.ok) {
+            const txt = await res.text().catch(() => "");
+            console.error("[VoiceTopicRecorder] /api/voice-stt error", res.status, txt);
+            setError(`STT error: ${res.status}`);
+            return;
+          }
 
-      const data = await res.json();
-      const transcript: string = data?.transcript || "";
-      handleTranscript(transcript, timestampStart, timestampEnd, blob);
-    } catch (e: any) {
-      console.error("[VoiceTopicRecorder] unexpected error", e);
-      setError(e?.message || String(e));
-    } finally {
+          const data = await res.json();
+          const transcript: string = data?.transcript || "";
+      const segments = Array.isArray(data?.segments) ? data.segments : undefined;
+      handleTranscript(transcript, timestampStart, timestampEnd, blob, segments);
+        } catch (e: any) {
+          console.error("[VoiceTopicRecorder] unexpected error", e);
+          setError(e?.message || String(e));
+        } finally {
       isTranscribingRef.current = false;
       setIsTranscribing(false);
-      if (queuedChunkRef.current) {
-        const queued = queuedChunkRef.current;
-        queuedChunkRef.current = null;
-        transcribeBlob(queued.blob, queued.start, queued.end);
+      if (queuedChunkRef.current.length > 0) {
+        const queued = queuedChunkRef.current.shift();
+        if (queued) {
+          transcribeBlob(queued.blob, queued.start, queued.end);
+        }
       }
     }
   };
@@ -303,7 +406,8 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
       mediaStreamRef.current = stream;
       setupSpeechDetection(stream);
       recordingModeRef.current = "continuous";
-      queuedChunkRef.current = null;
+      queuedChunkRef.current = [];
+      queuedChunkRef.current = [];
       setPendingAnnotation(null);
       setLastAutoSavedAt(null);
       setLastListenStatus("listening...");
@@ -335,7 +439,13 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
           const blob = new Blob(chunksRef.current, { type: firstType });
           if (blob.size > 0 && hasSpeechRef.current) {
             if (isTranscribingRef.current) {
-              queuedChunkRef.current = { blob, start: chunkStart, end: endTime };
+              queuedChunkRef.current.push({ blob, start: chunkStart, end: endTime });
+              // Safety cap to avoid unbounded memory growth if STT can't keep up
+              const maxQueue = 12;
+              if (queuedChunkRef.current.length > maxQueue) {
+                queuedChunkRef.current.shift();
+                setLastListenStatus(`queue overflow (dropped oldest), q=${queuedChunkRef.current.length}`);
+              }
             } else {
               transcribeBlob(blob, chunkStart, endTime);
             }
@@ -348,8 +458,8 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
         };
 
         mr.start();
-        const maxChunkMs = 5000;
-        const silenceStopMs = 700;
+        const maxChunkMs = 8000;
+        const silenceStopMs = 2000;
         continuousTimerRef.current = setTimeout(() => {
           // Max duration reached, wait for short silence before stopping.
           if (continuousStopCheckRef.current) {
@@ -470,7 +580,7 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
         <div className="flex items-start gap-2 text-[11px] text-gray-600">
           <div className="flex-1">
             <div className="line-clamp-2">
-              last: <span className="italic">{lastTranscript}</span>
+            last: <span className="italic">{lastTranscript}</span>
             </div>
             {lastTranscriptRaw && lastTranscriptRaw !== lastTranscript && (
               <div className="text-[10px] text-gray-400 line-clamp-2">
@@ -479,22 +589,22 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
             )}
           </div>
           {pendingAnnotation && !isContinuousListening ? (
-            <div className="flex flex-col gap-1">
-              <button
-                type="button"
-                onClick={handleSave}
-                className="px-10 py-0.5 rounded bg-green-500 text-white text-[10px] hover:bg-green-600"
-              >
-                save
-              </button>
-              <button
-                type="button"
-                onClick={handleRedo}
-                className="px-10 py-0.5 rounded bg-gray-200 text-gray-700 text-[10px] hover:bg-gray-300"
-              >
-                redo
-              </button>
-            </div>
+          <div className="flex flex-col gap-1">
+            <button
+              type="button"
+              onClick={handleSave}
+              className="px-10 py-0.5 rounded bg-green-500 text-white text-[10px] hover:bg-green-600"
+            >
+              save
+            </button>
+            <button
+              type="button"
+              onClick={handleRedo}
+              className="px-10 py-0.5 rounded bg-gray-200 text-gray-700 text-[10px] hover:bg-gray-300"
+            >
+              redo
+            </button>
+          </div>
           ) : (
             lastAutoSavedAt && (
               <span className="text-[10px] text-green-600 whitespace-nowrap">auto saved</span>

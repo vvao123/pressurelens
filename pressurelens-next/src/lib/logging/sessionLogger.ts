@@ -5,14 +5,17 @@ import type {
   SessionJson,
   PageOcrInfo,
   VoiceAnnotation,
+  RejectedVoiceAnnotation,
   SelectedTopic,
 } from "./types";
 
 let pointerSamples: PointerSample[] = [];
 let voiceAnnotations: VoiceAnnotation[] = [];
+let rejectedVoiceAnnotations: RejectedVoiceAnnotation[] = [];
 let pageOcr: PageOcrInfo | undefined;
 let selectedTopics: SelectedTopic[] = [];
 let voiceAudio: Record<string, { blob: Blob; type: string }> = {};
+let rejectedVoiceAudio: Record<string, { blob: Blob; type: string }> = {};
 
 const makeSessionId = (prefix: string) => {
   const t = Date.now();
@@ -80,6 +83,10 @@ export const sessionLogger = {
     voiceAnnotations.push(annotation);
   },
 
+  addRejectedVoiceAnnotation(annotation: RejectedVoiceAnnotation) {
+    rejectedVoiceAnnotations.push(annotation);
+  },
+
   addSelectedTopic(topic: SelectedTopic) {
     selectedTopics.push(topic);
   },
@@ -87,6 +94,11 @@ export const sessionLogger = {
   addVoiceAudio(id: string, blob: Blob) {
     if (!id || !blob || blob.size === 0) return;
     voiceAudio[id] = { blob, type: blob.type || "audio/webm" };
+  },
+
+  addRejectedVoiceAudio(id: string, blob: Blob) {
+    if (!id || !blob || blob.size === 0) return;
+    rejectedVoiceAudio[id] = { blob, type: blob.type || "audio/webm" };
   },
 
   setPageOcr(info: PageOcrInfo) {
@@ -123,6 +135,7 @@ export const sessionLogger = {
       pageOcr,
       pointerSamples,
       voiceAnnotations,
+      rejectedVoiceAnnotations,
       selectedTopics,
     };
 
@@ -135,6 +148,10 @@ export const sessionLogger = {
     Object.entries(voiceAudio).forEach(([id, { blob, type }]) => {
       const ext = getAudioExtension(type);
       zip.file(`audio/${id}.${ext}`, blob);
+    });
+    Object.entries(rejectedVoiceAudio).forEach(([id, { blob, type }]) => {
+      const ext = getAudioExtension(type);
+      zip.file(`audio_rejected/${id}.${ext}`, blob);
     });
     const zipBlob = await zip.generateAsync({ type: "blob" });
     const url = URL.createObjectURL(zipBlob);
@@ -150,9 +167,11 @@ export const sessionLogger = {
   reset() {
     pointerSamples = [];
     voiceAnnotations = [];
+    rejectedVoiceAnnotations = [];
     pageOcr = undefined;
     selectedTopics = [];
     voiceAudio = {};
+    rejectedVoiceAudio = {};
   },
 
   resetSessionIds(options?: { resetGlobal?: boolean; resetPageIndex?: boolean }) {

@@ -53,6 +53,21 @@ export type VoiceAnnotation = {
   timestampStart: number;
   timestampEnd: number;
   transcript: string;
+  rawTranscript: string;
+  /**
+   * When the wake word was detected (Unix ms, same clock as timestampStart/End).
+   * For continuous listening mode this is typically the end of the audio chunk.
+   */
+  wakeWordDetectedAt?: number;
+};
+
+export type RejectedVoiceAnnotation = {
+  id: string;
+  timestampStart: number;
+  timestampEnd: number;
+  transcript: string;
+  rejectedReason: "wake_word_not_detected" | "noise" | "japanese" | "other";
+  wakeWord?: string;
 };
 
 export type SelectedTopic = {
@@ -77,6 +92,7 @@ export type SessionJson = {
   pageOcr?: PageOcrInfo;
   pointerSamples: PointerSample[];
   voiceAnnotations: VoiceAnnotation[];
+  rejectedVoiceAnnotations?: RejectedVoiceAnnotation[];
   selectedTopics: SelectedTopic[];
 };
 
