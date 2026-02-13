@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import JSZip from "jszip";
 import Link from "next/link";
 
-type PressureLabel = "light" | "firm";
+type PressureLabel = "no_press" | "light" | "firm";
 
 type TipUV = { u: number; v: number; t: number };
 
@@ -31,9 +31,6 @@ type MediaPipeHands = {
 type CollectorConfig = {
   samplingHz: number; // patch sampling
   pressDurationMs: number;
-  stableWindowMs: number;
-  stableMinMs: number;
-  stableSpeedPxPerSec: number;
   patchInputSizePx: number; // crop size in source video pixels
   patchOutputSizePx: number; // final patch size
   jpegQuality: number;
@@ -143,9 +140,6 @@ export default function PressureDataCollector() {
 
   const latestTipRef = useRef<TipUV | null>(null);
   const latestHandConfidenceRef = useRef<number | null>(null);
-  const tipHistoryRef = useRef<TipUV[]>([]);
-  const stableSinceRef = useRef<number | null>(null);
-  const avgSpeedRef = useRef<number>(Infinity);
 
   const patchCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -175,10 +169,8 @@ export default function PressureDataCollector() {
     () => ({
       samplingHz: 5,
       pressDurationMs: 3000,
-      stableWindowMs: 700,
-      stableMinMs: 450,
-      stableSpeedPxPerSec: 25,
-      patchInputSizePx: 160,
+      // Avoid upscaling (which looks blurry). Keep crop == output for maximum sharpness.
+      patchInputSizePx: 224,
       patchOutputSizePx: 224,
       jpegQuality: 0.92,
       tipVCompensation: 0.0001,
@@ -191,61 +183,18 @@ export default function PressureDataCollector() {
   // Keep the button clickable even when Subject ID is missing; runSession() will show an explicit error.
   const canStartSession = !isBusy && (status === "ready" || status === "idle");
 
-  const computeStable = () => {
-    const video = videoRef.current;
-    if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) {
-      stableSinceRef.current = null;
-      avgSpeedRef.current = Infinity;
-      return { stable: false, avgSpeed: Infinity, stableSince: null as number | null };
-    }
-
-    const now = Date.now();
-    const windowMs = config.stableWindowMs;
-    const pts = tipHistoryRef.current.filter((p) => now - p.t <= windowMs);
-    tipHistoryRef.current = pts;
-
-    if (pts.length < 4) {
-      stableSinceRef.current = null;
-      avgSpeedRef.current = Infinity;
-      return { stable: false, avgSpeed: Infinity, stableSince: null as number | null };
-    }
-
-    let distSumPx = 0;
-    let dtSum = 0;
-    for (let i = 1; i < pts.length; i += 1) {
-      const a = pts[i - 1];
-      const b = pts[i];
-      const dt = b.t - a.t;
-      if (dt <= 0) continue;
-      const ax = a.u * video.videoWidth;
-      const ay = a.v * video.videoHeight;
-      const bx = b.u * video.videoWidth;
-      const by = b.v * video.videoHeight;
-      distSumPx += Math.hypot(bx - ax, by - ay);
-      dtSum += dt;
-    }
-    const avgSpeed = dtSum > 0 ? (distSumPx / dtSum) * 1000 : Infinity;
-    avgSpeedRef.current = avgSpeed;
-
-    const stableNow = Number.isFinite(avgSpeed) && avgSpeed <= config.stableSpeedPxPerSec;
-    if (stableNow) {
-      if (stableSinceRef.current == null) stableSinceRef.current = now;
-    } else {
-      stableSinceRef.current = null;
-    }
-
-    const stableSince = stableSinceRef.current;
-    const stableEnough = stableSince != null && now - stableSince >= config.stableMinMs;
-    return { stable: stableEnough, avgSpeed, stableSince };
-  };
-
   const startCamera = async () => {
     setError(null);
     setMessage("Starting camera...");
     setStatus("camera-starting");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user" },
+        video: {
+          facingMode: { ideal: "user" },
+          width: { ideal: 1920, min: 1280 },
+          height: { ideal: 1080, min: 720 },
+          frameRate: { ideal: 30, min: 15 },
+        },
         audio: false,
       });
       streamRef.current = stream;
@@ -281,9 +230,6 @@ export default function PressureDataCollector() {
     }
     latestTipRef.current = null;
     latestHandConfidenceRef.current = null;
-    tipHistoryRef.current = [];
-    stableSinceRef.current = null;
-    avgSpeedRef.current = Infinity;
     setTipForUI(null);
     setIsHandTracking(false);
   };
@@ -314,7 +260,6 @@ export default function PressureDataCollector() {
           latestHandConfidenceRef.current = null;
           setIsHandTracking(false);
           setTipForUI(null);
-          stableSinceRef.current = null;
           return;
         }
         const now = Date.now();
@@ -324,7 +269,6 @@ export default function PressureDataCollector() {
         const v = clamp(v0 * (1 - config.tipVCompensation), 0, 1);
         const tipUv: TipUV = { u: u0, v, t: now };
         latestTipRef.current = tipUv;
-        tipHistoryRef.current = [...tipHistoryRef.current, tipUv].slice(-90);
         setIsHandTracking(true);
 
         const overlay = overlayRef.current;
@@ -399,9 +343,6 @@ export default function PressureDataCollector() {
     const tip = latestTipRef.current;
     const video = videoRef.current;
     if (!tip || !video || video.videoWidth <= 0 || video.videoHeight <= 0) return false;
-
-    const { stable } = computeStable();
-    if (!stable) return false;
 
     const cx = tip.u * video.videoWidth;
     const cy = tip.v * video.videoHeight;
@@ -481,10 +422,8 @@ export default function PressureDataCollector() {
 
     setStatus("pressing");
     setMessage(
-      `Press and hold steady for ${msToText(config.pressDurationMs)} (auto-capture at ${config.samplingHz}Hz during stable segments).`
+      `Capture running for ${msToText(config.pressDurationMs)} (auto-capture at ${config.samplingHz}Hz).`
     );
-    stableSinceRef.current = null;
-    avgSpeedRef.current = Infinity;
 
     const zip = datasetZipRef.current;
     const jsonlLines: string[] = [];
@@ -503,14 +442,21 @@ export default function PressureDataCollector() {
       }
     }
 
-    const jsonl = jsonlLines.length > 0 ? `${jsonlLines.join("\n")}\n` : "";
+    setStatus("ready");
+    if (jsonlLines.length <= 0) {
+      setError("No patches captured. Make sure the fingertip is detected.");
+      setMessage("Nothing was added to the dataset buffer.");
+      return;
+    }
+
+    const jsonl = `${jsonlLines.join("\n")}\n`;
     zip.file(`sessions/${sessionId}.jsonl`, jsonl);
     datasetJsonlLinesRef.current.push(...jsonlLines);
     datasetSessionIdsRef.current = [...datasetSessionIdsRef.current, sessionId];
     setDatasetSessionCount(datasetSessionIdsRef.current.length);
-
-    setStatus("ready");
-    setMessage("Session saved to buffer. Capture more sessions, then download the dataset zip when ready.");
+    setMessage(
+      `Session buffered (${jsonlLines.length} patches). Capture more sessions, then download the dataset zip when ready.`
+    );
   };
 
   const downloadDatasetZip = async () => {
@@ -583,14 +529,6 @@ export default function PressureDataCollector() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const stableText = (() => {
-    const s = stableSinceRef.current;
-    const avg = avgSpeedRef.current;
-    if (!Number.isFinite(avg)) return "Stability: unknown (no hand / not enough samples)";
-    const stableEnough = s != null && Date.now() - s >= config.stableMinMs;
-    return `Stability: ${stableEnough ? "stable" : "unstable"} (avgSpeed=${avg.toFixed(1)}px/s)`;
-  })();
-
   return (
     <div className="min-h-screen bg-white text-gray-900">
       <div className="mx-auto max-w-5xl px-4 py-4 flex flex-col gap-3">
@@ -627,8 +565,6 @@ export default function PressureDataCollector() {
               )}
               <div className="absolute left-2 top-2 text-[11px] text-white/90 bg-black/50 px-2 py-1 rounded">
                 {isHandTracking ? "Hand: detected" : "Hand: missing"}
-                {" · "}
-                {stableText}
               </div>
             </div>
           </div>
@@ -671,6 +607,18 @@ export default function PressureDataCollector() {
             <div className="flex flex-col gap-1">
               <div className="text-sm font-medium">Label</div>
               <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setLabel("no_press")}
+                  className={`px-3 py-1.5 rounded text-sm border ${
+                    label === "no_press"
+                      ? "bg-blue-600 text-white border-blue-600"
+                      : "bg-white hover:bg-gray-50 border-gray-200"
+                  }`}
+                  disabled={status === "pressing" || status === "exporting"}
+                >
+                  no_press
+                </button>
                 <button
                   type="button"
                   onClick={() => setLabel("light")}
@@ -756,9 +704,6 @@ export default function PressureDataCollector() {
               <div className="font-medium mb-1">Status</div>
               <div>{message || "—"}</div>
               {error && <div className="mt-1 text-red-600">{error}</div>}
-              <div className="mt-2 text-gray-500">
-                Stability rule: avgSpeed ≤ {config.stableSpeedPxPerSec}px/s for ≥ {config.stableMinMs}ms
-              </div>
               <div className="text-gray-500">
                 Patch: input {config.patchInputSizePx}px → output {config.patchOutputSizePx}px (JPEG q={config.jpegQuality})
               </div>
