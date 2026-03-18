@@ -20,7 +20,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const { text, maxTopics = 20 } = body;
+  const { text, maxTopics = 60 } = body;
 
   if (!text || typeof text !== "string") {
     return new Response(
@@ -44,31 +44,27 @@ export async function POST(req: Request) {
   }
 
   const systemPrompt =
-    "You are a topic extraction module used by a recommendation system. Your job is to extract topics from a full-page OCR text that the user might be interested in. You must return pure JSON only, with no explanations or extra text.";
+    "You are a keyword/topic extraction module used by a recommendation system. You must return pure JSON only, with no explanations or extra text.";
 
   const userPrompt = `
-Below is the OCR text for an entire screen/page. Based on its semantics, extract a list of topics that the user is likely interested in.
+Below is the OCR text for an entire screen/page. Extract as MANY interesting keywords/phrases as possible that may capture the reader's interest.
 Requirements:
-1. Each topic should be a short keyword/phrase/noun phrase (1–8 words or characters), as concise as possible.
-2. Cover the core concepts, functions, product names, content themes, etc. that are useful for recall and ranking in a recommender system.
-3. For each topic, assign a rough importance "weight" in the range 0–1, indicating how important this topic is on the page.
-4. All output must be **valid JSON**, with no comments or extra text.
-5. Topic "text" should preferably be in the same language as the OCR text when possible.
+1. Output items are short keywords/phrases/noun phrases (1–8 words/chars).
+2. Include BOTH high-level topics AND concrete terms that may trigger interest: features, functions, entities, acronyms, product names, technical terms, proper nouns, commands, metrics, unusual phrases.
+3. Prefer items that appear in the OCR text (be robust to OCR noise).
+4. De-duplicate aggressively (case-insensitive, singular/plural variants).
+5. Do NOT output weights or categories; just output the strings.
+6. All output must be valid JSON, no extra text.
 
 The JSON output MUST strictly follow:
 {
-  "topics": [
-    {
-      "text": "topic keyword or short phrase",
-      "weight": 0.0,
-      "category": "an optional coarse label such as: function, content, entity, action, other"
-    }
-  ]
+  "topics": ["keyword or short phrase", "another keyword", "..."]
 }
 
 Notes:
 - Do not add any extra fields.
 - The number of topics must not exceed ${maxTopics}.
+- Prefer producing MORE items up to the limit; avoid trivial stop-words.
 - Only return JSON.
 
 Here is the OCR text (may contain noise or errors, be robust when extracting topics):
@@ -131,7 +127,19 @@ Here is the OCR text (may contain noise or errors, be robust when extracting top
       parsed = { raw: content };
     }
 
-    return new Response(JSON.stringify(parsed), {
+    // Normalize output to the minimal contract:
+    //   { topics: string[] }
+    const rawTopics = Array.isArray((parsed as any)?.topics) ? (parsed as any).topics : [];
+    const topics = rawTopics
+      .map((t: any) => {
+        if (typeof t === "string") return t.trim();
+        if (t && typeof t === "object" && typeof t.text === "string") return t.text.trim();
+        return "";
+      })
+      .filter(Boolean)
+      .slice(0, maxTopics);
+
+    return new Response(JSON.stringify({ topics }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });

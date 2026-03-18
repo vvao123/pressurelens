@@ -1,7 +1,7 @@
 export const runtime = "edge";
 
 export async function POST(req: Request) {
-  const { text, level, image, streaming = false } = await req.json();
+  const { text, level, image, streaming = false, prompt: providedPrompt, language = "en" } = await req.json();
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   if (!OPENAI_API_KEY) {
     return new Response(JSON.stringify({ error: 'OpenAI API key not configured.' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
@@ -11,7 +11,9 @@ export async function POST(req: Request) {
   console.log('[LLM API] Received image data:', image ? 'Yes' : 'No');
   console.log('[LLM API] Streaming mode:', streaming);
 
-  const prompt = level === "light"
+  const prompt = (typeof providedPrompt === "string" && providedPrompt.trim())
+    ? providedPrompt.trim()
+    : level === "light"
     ? `Please define or explain in one sentence: "${text}"`
     : level === "medium"
     ? `Please explain in one paragraph (3-5 sentences) clearly: "${text}", including its meaning and basic usage.`
@@ -34,7 +36,7 @@ The content must be accurate and practical.`;
       content: [
         {
           type: "text",
-          text: `I have captured an image and also extracted this text from it using OCR: "${text}". Please analyze the image .The text could be inaccurate,in that case, just ignore it. ${prompt}Please answer in English.`
+          text: `I have captured an image and also extracted this text from it using OCR: "${text}". The OCR text could be inaccurate; if so, ignore it and rely on the image. ${prompt}\n\nPlease answer in ${language === "zh" ? "Chinese" : "English"}.`
         },
         {
           type: "image_url",

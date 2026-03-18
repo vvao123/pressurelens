@@ -458,8 +458,8 @@ export default function VoiceTopicRecorder({ onAnnotation }: Props) {
         };
 
         mr.start();
-        const maxChunkMs = 8000;
-        const silenceStopMs = 2000;
+        const maxChunkMs = 5000;
+        const silenceStopMs = 1000;
         continuousTimerRef.current = setTimeout(() => {
           // Max duration reached, wait for short silence before stopping.
           if (continuousStopCheckRef.current) {

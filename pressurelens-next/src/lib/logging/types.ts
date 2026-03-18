@@ -40,12 +40,25 @@ export type PointerSampleInput = Omit<PointerSample, "speed"> & {
 };
 
 export type PageOcrInfo = {
+  /**
+   * Final page text used for downstream tasks (topics / disambiguation).
+   * May include carry-over from previous page.
+   */
   pageText: string;
-  pageTopics: {
-    text: string;
-    weight: number;
-    category?: string;
-  }[];
+  /**
+   * Raw OCR text for THIS page only (no carry-over).
+   */
+  pageTextRaw?: string;
+  /**
+   * Carry-over snippet from previous page appended to the beginning of pageText.
+   * Used to avoid boundary truncation across pages.
+   */
+  carryOverFromPrev?: string;
+  /**
+   * Page topics/keywords/phrases for recommendation/recall.
+   * Minimal contract: string list only (no weight/category).
+   */
+  pageTopics: string[];
 };
 
 export type VoiceAnnotation = {

@@ -23,13 +23,21 @@ export default function Home() {
   const animationFrameRef = useRef<number | null>(null);
   const threePivotBaseYRef = useRef<number>(0); // Record baseline Y for top pivot
   const shaderUniformsRef = useRef<{ u_map: { value: THREE.Texture | null }; u_comp: { value: number } } | null>(null);
-  const [warpCompensation, setWarpCompensation] = useState<number>(0.5); // Suggested range 0~0.5, 0 disables
+  const [warpCompensation, setWarpCompensation] = useState<number>(0.18); // Suggested range 0~0.5, 0 disables
   // Keep latest warpCompensation in ref to avoid stale closures in MediaPipe callbacks
   const warpCompensationRef = useRef<number>(warpCompensation);
 
   // Fingertip visual compensation strength (for MediaPipe marker alignment)
   const [fingerCompStrength, setFingerCompStrength] = useState<number>(0.057);
   const fingerCompStrengthRef = useRef<number>(fingerCompStrength);
+  // Fingertip compensation shaping:
+  // Empirically, in our setup MediaPipe fingertip y usually falls within ~[0.2, 0.65].
+  // We want: bottom area gets *less* than linear, top area gets *more* than linear.
+  // Also keep zoom influence mild so compensation doesn't blow up after pinch-zoom.
+  const fingerCompYMin = 0.2;
+  const fingerCompYMax = 0.65;
+  const fingerCompYBalance = 0.9; // 0=linear (old), higher=top more / bottom less
+  const fingerCompZoomExp = 0.6;  // 1.0 scales linearly with zoomFactor; keep <1 for stability
   // Keep finger long-press LLM toggle in ref to avoid stale closures in MediaPipe callbacks
   const isFingerLongPressLLMEnabledRef = useRef<boolean>(true);
   const offscreenRendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -65,10 +73,10 @@ export default function Home() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false); // Prevent duplicate processing
   const [isEnhancementEnabled, setIsEnhancementEnabled] = useState<boolean>(false); // Enable image enhancement
   const [videoScale, setVideoScale] = useState<number>(1.49); // Video scale
-  const [videoTranslate, setVideoTranslate] = useState<{x: number, y: number}>({x: 0, y: 0}); // Video translation
+  const [videoTranslate, setVideoTranslate] = useState<{x: number, y: number}>({x: 0, y: 20}); // Video translation
   const [floatingResponse, setFloatingResponse] = useState<{text: string, position: {x: number, y: number}} | null>(null); // Floating response
   const [isDraggingFloat, setIsDraggingFloat] = useState<boolean>(false); // Dragging floating panel
-  const [perspectiveStrength, setPerspectiveStrength] = useState<number>(67); // Perspective strength 0-100
+  const [perspectiveStrength, setPerspectiveStrength] = useState<number>(80); // Perspective strength 0-100
   // Topics + voice notes panel open state
   const [isTopicsPanelOpen, setIsTopicsPanelOpen] = useState<boolean>(true);
   const [pageIndex, setPageIndex] = useState<number>(1);
@@ -81,11 +89,50 @@ export default function Home() {
   const [ocrScale, setOcrScale] = useState<number>(2);
   const [regionCapturedImage, setRegionCapturedImage] = useState<string>("");
   const [regionRecognizedText, setRegionRecognizedText] = useState<string>("");
-  const [regionTopics, setRegionTopics] = useState<
-    { text: string; weight: number; category?: string }[] | null
-  >(null);
+  const [regionTopics, setRegionTopics] = useState<string[] | null>(null);
   const [regionTopicsLoading, setRegionTopicsLoading] = useState(false);
   const [regionTopicsError, setRegionTopicsError] = useState<string | null>(null);
+  // Cross-page OCR carry-over: prepend previous page tail (e.g., last word) to next page text
+  const ocrCarryOverRef = useRef<string>("");
+  const lastOcrWordRef = useRef<string>("");
+  const lastOcrRawTextRef = useRef<string>("");
+  const [carryOverDebug, setCarryOverDebug] = useState<string>("");
+
+  const extractLastWord = (text: string): string => {
+    const s = (text || "").trim();
+    if (!s) return "";
+    // Try English-ish last token; fallback to last non-space chunk.
+    const m = s.match(/([A-Za-z][A-Za-z0-9'_-]{1,})\s*$/);
+    if (m?.[1]) return m[1];
+    const parts = s.split(/\s+/).filter(Boolean);
+    return parts[parts.length - 1] || "";
+  };
+
+  const extractTailWords = (text: string, n: number = 10): string => {
+    const s = (text || "").replace(/\s+/g, " ").trim();
+    if (!s) return "";
+    const parts = s.split(" ").filter(Boolean);
+    if (parts.length <= n) return s;
+    return parts.slice(-n).join(" ");
+  };
+
+  const buildContextSnippet = (term: string, text: string, radius: number = 160): string => {
+    const t = (term || "").trim();
+    const s = (text || "").replace(/\s+/g, " ").trim();
+    if (!t || !s) return "";
+    const lowerS = s.toLowerCase();
+    const lowerT = t.toLowerCase();
+    const idx = lowerS.indexOf(lowerT);
+    if (idx < 0) {
+      // fallback: provide full OCR text as context (user requested)
+      return s;
+    }
+    const start = Math.max(0, idx - radius);
+    const end = Math.min(s.length, idx + lowerT.length + radius);
+    const prefix = start > 0 ? "…" : "";
+    const suffix = end < s.length ? "…" : "";
+    return `${prefix}${s.slice(start, end)}${suffix}`;
+  };
 
   // Data logging toggle
   const [isLoggingEnabled, setIsLoggingEnabled] = useState<boolean>(false);
@@ -96,6 +143,16 @@ export default function Home() {
   }, [pageIndex]);
 
   const resetSessionForNewPage = () => {
+    // Store carry-over tail for next page BEFORE resetting
+    const tail = lastOcrWordRef.current || extractTailWords(lastOcrRawTextRef.current, 10);
+    ocrCarryOverRef.current = tail;
+    if (tail) {
+      console.log("[CarryOver] set for next page:", { pageIndex, tail });
+      setCarryOverDebug(`carry-over(next page)="${tail}"`);
+    } else {
+      console.log("[CarryOver] set for next page: <empty>", { pageIndex });
+      setCarryOverDebug(`carry-over(next page)=<empty>`);
+    }
     const s = sessionLogger.getSummary();
     const hasLogs =
       s.pointerSamples > 0 ||
@@ -139,11 +196,30 @@ export default function Home() {
     setOcrScale(scale);
     const fullText = words.map((w) => w.text).join(" ").trim();
     try {
-      setRegionRecognizedText(fullText);
+      // Remember raw text and last word for cross-page carry-over
+      lastOcrRawTextRef.current = fullText;
+      // Use tail words (default 10) for cross-page carry-over
+      lastOcrWordRef.current = extractTailWords(fullText, 10) || extractLastWord(fullText);
+      const carry = (ocrCarryOverRef.current || "").trim();
+      const combinedText = carry ? `${carry} ${fullText}`.trim() : fullText;
+      setRegionRecognizedText(combinedText);
+      if (carry) {
+        console.log("[CarryOver] OCR combined:", {
+          pageIndex,
+          carry,
+          rawHead: fullText.slice(0, 80),
+          combinedHead: combinedText.slice(0, 80),
+        });
+        setCarryOverDebug(`carry-over(prev page)="${carry}"`);
+      } else {
+        setCarryOverDebug(`carry-over(prev page)=<empty>`);
+      }
     } catch {}
 
     // Save full-page OCR text into sessionLogger and call LLM for topics
-    if (!fullText) {
+    const carry = (ocrCarryOverRef.current || "").trim();
+    const combinedText = carry ? `${carry} ${fullText}`.trim() : fullText;
+    if (!combinedText) {
       setRegionTopics([]);
       sessionLogger.setPageOcr({ pageText: "", pageTopics: [] });
       return;
@@ -154,7 +230,7 @@ export default function Home() {
       const res = await fetch("/api/topics", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: fullText, maxTopics: 30 }),
+        body: JSON.stringify({ text: combinedText, maxTopics: 80 }),
       });
 
       if (!res.ok) {
@@ -167,9 +243,17 @@ export default function Home() {
       }
 
       const data = await res.json();
-      const list = Array.isArray(data?.topics) ? data.topics : [];
+      const listRaw = Array.isArray(data?.topics) ? data.topics : [];
+      const list = listRaw
+        .map((t: any) => (typeof t === "string" ? t.trim() : String(t ?? "").trim()))
+        .filter(Boolean);
       setRegionTopics(list);
-      sessionLogger.setPageOcr({ pageText: fullText, pageTopics: list });
+      sessionLogger.setPageOcr({
+        pageText: combinedText,
+        pageTextRaw: fullText,
+        carryOverFromPrev: carry || undefined,
+        pageTopics: list,
+      });
       console.log("[Region OCR] topics for recommendation:", list);
     } catch (e) {
       console.error("[Region OCR] failed to call /api/topics:", e);
@@ -426,26 +510,43 @@ export default function Home() {
   const topicMeaningInFlightRef = useRef<Set<string>>(new Set());
   const [downloadToast, setDownloadToast] = useState<string | null>(null);
 
-  const explainTopicMeaning = async (topicText: string) => {
+  const explainTopicMeaning = async (topicText: string, opts?: { kind?: "topic" | "vocab"; knownMeaning?: string }) => {
     const t = topicText.trim();
     if (!t) return;
     // simple cache by exact text
     const cached = topicMeaningCacheRef.current.get(t);
     if (cached) {
-      setAnswer(`topic: ${t}\n\n${cached}`);
+      setAnswer(`${opts?.kind ?? "topic"}: ${t}\n\n${cached}`);
       return;
     }
     if (topicMeaningInFlightRef.current.has(t)) return;
     topicMeaningInFlightRef.current.add(t);
     try {
-      setAnswer(`topic: ${t}\n\n generating meaning...`);
+      setAnswer(`${opts?.kind ?? "topic"}: ${t}\n\nGenerating explanation...`);
+      const ctx = buildContextSnippet(t, regionRecognizedText || "");
+      const carry = (ocrCarryOverRef.current || "").trim();
+      const prompt = [
+        `Explain the term/phrase. Disambiguate based on context and avoid generic encyclopedia definitions.`,
+        ``,
+        `Term: ${t}`,
+        opts?.knownMeaning ? `Known short meaning: ${opts.knownMeaning}` : "",
+        `PageIndex: ${pageIndex}`,
+        carry ? `Cross-page carry-over (prev page tail): ${carry}` : "",
+        ctx ? `Context snippet: ${ctx}` : `${regionRecognizedText}`,
+        ``,
+        `Output requirements:`,
+        `- First: 1-sentence meaning`,
+        `- Keep it concise`,
+      ].filter(Boolean).join("\n");
       const resp = await fetch("/api/llm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          text: `${t}\n\nPlease explain the meaning of this topic in one sentence.`,
+          text: t,
+          prompt,
           level: "light",
           streaming: false,
+          language: "en",
         }),
       });
       if (!resp.ok) {
@@ -457,7 +558,7 @@ export default function Home() {
       const content: string = data?.content || "";
       if (content) {
         topicMeaningCacheRef.current.set(t, content);
-        setAnswer(`topic: ${t}\n\n${content}`);
+        setAnswer(`${opts?.kind ?? "topic"}: ${t}\n\n${content}`);
       }
     } catch (e) {
       console.error("[TopicMeaning] unexpected error", e);
@@ -866,8 +967,8 @@ export default function Home() {
         void main() {
           // Lower y compresses more; apply inverse stretch compensation
           float scale = 1.0 / mix(1.0, 1.0 + u_comp, 1.0-v_uv.y);
-          float cy = 0.5;
-          float y = (v_uv.y - cy) * scale + cy; // Non-linear stretch around center
+          float cy = 0.85; // Anchor closer to the top hinge (v_uv.y uses bottom=0, top=1)
+          float y = (v_uv.y - cy) * scale + cy; // Non-linear stretch around anchor
           vec2 uv2 = vec2(v_uv.x, clamp(y, 0.0, 1.0));
           gl_FragColor = texture2D(u_map, uv2);
         }
@@ -937,47 +1038,35 @@ export default function Home() {
   // ===== Warp compensation: rebuild per shader formula and invert in top-based coordinates =====
   // Shader code (note v_uv.y uses bottom=0, top=1):
   //   float scale = 1.0 / mix(1.0, 1.0 + u_comp, 1.0 - v_uv.y);
-  //   float cy = 0.5;
+  //   float cy = WARP_CY;
   //   float y  = (v_uv.y - cy) * scale + cy;
   //   vec2 uv2 = vec2(v_uv.x, clamp(y, 0.0, 1.0));
   //
-  // MediaPipe v uses top=0, bottom=1, so convert to the same top-based space:
+  // MediaPipe v uses top=0, bottom=1 (top-based). The shader operates in bottom-based UV (0=bottom,1=top).
+  // For fingertip projection, we must invert the SAME warp used in the fragment shader; otherwise,
+  // when warp is enabled the marker will drift vertically (even if rotate/scale/translate are correct).
   //
-  //   Let y_t = 1.0 - v_uv.y (top-based: 0=top, 1=bottom)
-  //       y2_t = 1.0 - uv2_y
-  //
-  // Forward warp in top-based coordinates:
-  //   y2_t = 0.5 - (0.5 - y_t) / (1.0 + c * y_t)    （c = u_comp）
-  //
-  // We implement:
-  //   1) applyWarpTop(y_t, c): y_t -> y2_t (exactly matches shader warp)
-  //   2) invertVerticalWarp(v, c): given original video coord v (= y2_t, 0=top,1=bottom),
-  //      solve y_t via binary search and use it as plane v for 3D projection.
-  const applyWarpTop = (vTop: number, comp: number): number => {
-    if (comp <= 0) return vTop;
-    const denom = 1 + comp * vTop;
-    if (denom <= 1e-6) return Math.min(1, Math.max(0, vTop));
-    const y2 = 0.5 - (0.5 - vTop) / denom;
-    return Math.min(1, Math.max(0, y2));
-  };
+  // Keep shader + JS inversion perfectly in sync.
+  const WARP_CY = 0.85; // bottom-based UV anchor (1=top). Helps reduce "top/bottom wide, middle narrow" feel.
 
-  const invertVerticalWarp = (vSample: number, comp: number): number => {
-    if (comp <= 0) return vSample;
-    // Simple monotonic binary search on [0,1] to solve applyWarpTop(v, comp) ≈ vSample
-    let low = 0;
-    let high = 1;
-    let mid = vSample;
-    for (let i = 0; i < 24; i++) {
-      mid = (low + high) / 2;
-      const y2 = applyWarpTop(mid, comp);
-      if (y2 > vSample) {
-        high = mid;
-      } else {
-        low = mid;
-      }
-    }
-    const vPlane = (low + high) / 2;
-    return Math.min(1, Math.max(0, vPlane));
+  // Analytic inverse (matches shader exactly, ignoring clamp):
+  // Shader forward mapping in bottom-based coords (s = v_uv.y, yTex = uv2.y):
+  //   scale = 1 / (1 + c*(1 - s))
+  //   yTex  = cy + (s - cy)*scale
+  // Solve for s given yTex:
+  //   s = ((1+c)*yTex - c*cy) / (1 + c*(yTex - cy))
+  //
+  // We expose the inversion in top-based coords:
+  //   vTop (MediaPipe) -> yTex(bottom-based)=1-vTop -> s -> vPlaneTop = 1-s
+  const invertVerticalWarp = (vTopSample: number, comp: number): number => {
+    const vTop = Math.min(1, Math.max(0, vTopSample));
+    if (comp <= 0) return vTop;
+    const yTex = 1 - vTop; // bottom-based texture coord
+    const denom = 1 + comp * (yTex - WARP_CY);
+    if (Math.abs(denom) < 1e-6) return vTop;
+    const s = ((1 + comp) * yTex - comp * WARP_CY) / denom; // plane UV (bottom-based)
+    const vPlaneTop = 1 - s; // convert back to top-based
+    return Math.min(1, Math.max(0, vPlaneTop));
   };
 
   // Map MediaPipe normalized video coords (u,v in [0,1]) to overlay screen coords
@@ -1245,14 +1334,27 @@ export default function Home() {
               // Visual compensation for lower fingertip:
               // - MediaPipe fingerTip.y is 0~1 (0=top, 1=bottom)
               // - Lower positions look stretched by perspective/warp; marker appears mid-nail
-              // Apply a downward offset that grows with y, only for fingerTipPosition
+              // Apply an offset that grows with y, only for fingerTipPosition
               // (does not affect video or capture region).
               // const extraY = fingerCompStrengthRef.current * (-fingerTip.y) * containerRect.height;
-              // Scale compensation with current zoom (mesh scale) so it stays consistent after pinch-zoom
+              // Scale compensation with current zoom (mesh scale), mildly, so it stays stable after pinch-zoom
               const zoomFactor = threeMeshRef.current?.scale?.y ?? 1;
-              console.log('zoomFactor', zoomFactor);
+              const zoomScale = Math.pow(Math.max(0.01, zoomFactor), fingerCompZoomExp);
+
+              const yClamped = Math.min(1, Math.max(0, fingerTip.y));
+              const tRaw = (yClamped - fingerCompYMin) / (fingerCompYMax - fingerCompYMin);
+              const t = Math.min(1, Math.max(0, tRaw));
+              // yBalance(t) = 1 + k*(0.5 - t)
+              // - top (t<0.5): >1  => more comp
+              // - bottom (t>0.5): <1 => less comp
+              const yBalance = 1 + fingerCompYBalance * (0.5 - t);
+
               const extraY =
-                fingerCompStrengthRef.current * (-fingerTip.y) * containerRect.height * zoomFactor;
+                fingerCompStrengthRef.current *
+                (-yClamped) *
+                containerRect.height *
+                zoomScale *
+                yBalance;
               y += extraY;
 
               // === Fingertip smoothing: low-pass + small jitter dead zone ===
@@ -3656,6 +3758,11 @@ export default function Home() {
                     </span>
                   )}
                 </div>
+                {carryOverDebug && (
+                  <div className="text-[10px] text-gray-500 mb-1">
+                    {carryOverDebug}
+                  </div>
+                )}
 
                 {regionTopicsError && (
                   <div className="mb-1 text-[10px] text-red-500">
@@ -3676,16 +3783,16 @@ export default function Home() {
                           sessionLogger.addSelectedTopic({
                             id,
                             timestamp: Date.now(),
-                            text: t.text,
+                            text: t,
                             source: "page_topic",
                           });
-                          setLastSelectedTopic(t.text);
-                          explainTopicMeaning(t.text);
+                          setLastSelectedTopic(t);
+                          explainTopicMeaning(t, { kind: "topic" });
                           setTimeout(() => setLastSelectedTopic(null), 1500);
                         }}
                         className="px-2 py-1 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 text-[11px]"
                       >
-                        <span className="font-semibold">{t.text}</span>
+                        <span className="font-semibold">{t}</span>
                         {/* {typeof t.weight === "number" && (
                           <span className="ml-1 text-gray-500">
                             ({t.weight.toFixed(2)})
@@ -3727,7 +3834,7 @@ export default function Home() {
                         source: "voice",
                       });
                       setLastSelectedTopic(topicText);
-                      explainTopicMeaning(topicText);
+                      explainTopicMeaning(topicText, { kind: "topic" });
                       setTimeout(() => setLastSelectedTopic(null), 1500);
                     }
                   }}
