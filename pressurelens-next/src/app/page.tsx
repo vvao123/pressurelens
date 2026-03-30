@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 import { useEffect, useRef, useState, useMemo } from "react";
 import { createWorker, Worker } from "tesseract.js";
 import { recognizeWordsFromCanvas, WordBBox } from "../lib/ocr/tesseract";
@@ -7,8 +7,11 @@ import { sessionLogger } from "../lib/logging/sessionLogger";
 import { getNearestOcrWord } from "../lib/logging/nearestWord";
 import type { PointerSampleInput, VoiceAnnotation, NearestWordInfo } from "../lib/logging/types";
 import VoiceTopicRecorder from "../components/VoiceTopicRecorder";
+import { useTopicRanking } from "../lib/topicRanking/useTopicRanking";
 
 type Level = "light" | "medium" | "hard";
+
+const normalizeTopicKey = (text: string) => text.trim().toLowerCase();
 
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -92,6 +95,26 @@ export default function Home() {
   const [regionTopics, setRegionTopics] = useState<string[] | null>(null);
   const [regionTopicsLoading, setRegionTopicsLoading] = useState(false);
   const [regionTopicsError, setRegionTopicsError] = useState<string | null>(null);
+  const [rankingSessionId, setRankingSessionId] = useState<string>(() => sessionLogger.getSummary().sessionId);
+  const {
+    rankedTopics,
+    rankedTopicMap,
+    debug: topicRankingDebug,
+    model: topicRankingModel,
+    isLoading: isTopicRankingLoading,
+    error: topicRankingError,
+    pushPointerSample: pushTopicRankingPointerSample,
+    pushSelectedTopic,
+    reset: resetTopicRanking,
+  } = useTopicRanking({
+    sessionId: rankingSessionId,
+    pageId: `page-${pageIndex}`,
+    pageTopics: regionTopics,
+    enabled: true,
+    topK: 5,
+  });
+  const pushTopicRankingPointerSampleRef = useRef(pushTopicRankingPointerSample);
+  const topRankedTopics = rankedTopics.slice(0, 3);
   // Cross-page OCR carry-over: prepend previous page tail (e.g., last word) to next page text
   const ocrCarryOverRef = useRef<string>("");
   const lastOcrWordRef = useRef<string>("");
@@ -129,8 +152,8 @@ export default function Home() {
     }
     const start = Math.max(0, idx - radius);
     const end = Math.min(s.length, idx + lowerT.length + radius);
-    const prefix = start > 0 ? "…" : "";
-    const suffix = end < s.length ? "…" : "";
+    const prefix = start > 0 ? "..." : "";
+    const suffix = end < s.length ? "..." : "";
     return `${prefix}${s.slice(start, end)}${suffix}`;
   };
 
@@ -141,6 +164,10 @@ export default function Home() {
   useEffect(() => {
     sessionLogger.setPageIndex(pageIndex);
   }, [pageIndex]);
+
+  useEffect(() => {
+    pushTopicRankingPointerSampleRef.current = pushTopicRankingPointerSample;
+  }, [pushTopicRankingPointerSample]);
 
   const resetSessionForNewPage = () => {
     // Store carry-over tail for next page BEFORE resetting
@@ -161,11 +188,12 @@ export default function Home() {
       s.hasPageOcr;
     if (hasLogs) {
       sessionLogger.exportJson(deviceInfo);
-      setDownloadToast("✅ save current page package and ready for new page");
+      setDownloadToast("Saved current page package and ready for the next page");
       setTimeout(() => setDownloadToast(null), 1500);
       setPageIndex((prev) => prev + 1);
     }
     sessionLogger.reset();
+    resetTopicRanking();
     
   };
 
@@ -272,6 +300,7 @@ export default function Home() {
     setRegionRecognizedText("");
     setRegionTopics(null);
     setRegionTopicsError(null);
+    resetTopicRanking();
   };
 
   // Draw OCR overlay word boxes onto ocrOverlayCanvas
@@ -381,8 +410,6 @@ export default function Home() {
   
   // Pointing data sampling (~10Hz): record fingertip position + nearest OCR word
   useEffect(() => {
-    if (!isLoggingEnabled) return;
-
     const intervalMs = 100; // 10Hz
     let timer: number | undefined;
 
@@ -448,7 +475,10 @@ export default function Home() {
           interestScore: interest,
           speed: undefined,
         };
-        sessionLogger.addPointerSample(sample);
+        pushTopicRankingPointerSampleRef.current(sample);
+        if (isLoggingEnabled) {
+          sessionLogger.addPointerSample(sample);
+        }
         setDebugNearestWord(nearest);
       } else {
         // No fingertip detected; skip logging
@@ -565,6 +595,28 @@ export default function Home() {
     } finally {
       topicMeaningInFlightRef.current.delete(t);
     }
+  };
+
+  const handleTopicSelection = (
+    topicText: string,
+    source: "page_topic" | "voice",
+    timestamp = Date.now()
+  ) => {
+    const normalized = topicText.trim();
+    if (!normalized) return;
+
+    sessionLogger.addSelectedTopic({
+      id: `${source === "voice" ? "voice-topic" : "topic"}-${timestamp}-${Math.random()
+        .toString(36)
+        .slice(2, 6)}`,
+      timestamp,
+      text: normalized,
+      source,
+    });
+    pushSelectedTopic(normalized, timestamp);
+    setLastSelectedTopic(normalized);
+    explainTopicMeaning(normalized, { kind: "topic" });
+    setTimeout(() => setLastSelectedTopic(null), 1500);
   };
 
   // Interest detection config
@@ -689,10 +741,14 @@ export default function Home() {
       // Extract keywords combined with OCR results
       if (answer && answer.length > 0) {
         // Simple keyword extraction logic
-        const words = answer.split(/[\s\n,，。！？；：]/).filter(word => 
-          word.length > 1 && 
-          !['的', '了', '在', '是', '有', '和', '与', '或', '但', '而', '这', '那', '个', '一', '二', '三', '四', '五'].includes(word)
-        );
+        const words = answer
+          .split(/[\s,.;:!?]+/)
+          .map((word) => word.trim().toLowerCase())
+          .filter(
+            (word) =>
+              word.length > 1 &&
+              !["the", "and", "for", "with", "that", "this", "from", "into", "are", "you"].includes(word)
+          );
         
         // Return the top 5 longest words as keywords
         return words
@@ -702,10 +758,10 @@ export default function Home() {
       }
       
       // If no OCR results, return mock keywords
-      const keywords = ['技术', '创新', '人工智能', '用户体验', '设计', '算法', '数据', '分析', '系统', '应用'];
+      const keywords = ["tech", "innovation", "ai", "ux", "design", "algorithm", "data", "analysis", "system", "application"];
       return keywords.slice(0, Math.floor(Math.random() * 3) + 1);
     } catch (error) {
-      console.error('关键词提取失败:', error);
+      console.error('keyword extraction failed', error);
       return [];
     }
   };
@@ -813,21 +869,21 @@ export default function Home() {
             try {
               const videoTrack = stream.getVideoTracks()[0];
               const capabilities = videoTrack.getCapabilities() as any;
-              console.log('[Camera] 摄像头能力:', capabilities);
+              console.log('[Camera] 鎽勫儚澶磋兘鍔?', capabilities);
               
               // If focus is supported, enable continuous autofocus
               if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
                 await videoTrack.applyConstraints({
                   advanced: [{ focusMode: 'continuous' } as any]
                 });
-                console.log('[Camera] ✅ 已启用连续自动对焦');
+                console.log('[Camera] enabled continuous autofocus');
               } else if (capabilities.focusMode && capabilities.focusMode.includes('single-shot')) {
                 await videoTrack.applyConstraints({
                   advanced: [{ focusMode: 'single-shot' } as any]
                 });
-                console.log('[Camera] ✅ 已启用单次自动对焦');
+                console.log('[Camera] enabled single-shot autofocus');
               } else {
-                console.log('[Camera] ⚠️ 设备不支持自动对焦控制，尝试手动对焦...');
+                console.log('[Camera] 鈿狅笍 璁惧涓嶆敮鎸佽嚜鍔ㄥ鐒︽帶鍒讹紝灏濊瘯鎵嬪姩瀵圭劍...');
                 
                 // If manual focus distance is supported
                 if (capabilities.focusDistance) {
@@ -836,9 +892,9 @@ export default function Home() {
                   await videoTrack.applyConstraints({
                     advanced: [{ focusDistance: midDistance } as any]
                   });
-                  console.log('[Camera] ✅ 已设置手动对焦距离:', midDistance);
+                  console.log('[Camera] set manual focus distance', midDistance);
                 } else {
-                  console.log('[Camera] ⚠️ 设备不支持任何对焦控制');
+                  console.log('[Camera] device does not support focus control');
                 }
               }
               
@@ -847,7 +903,7 @@ export default function Home() {
                 await videoTrack.applyConstraints({
                   advanced: [{ whiteBalanceMode: 'continuous' } as any]
                 });
-                console.log('[Camera] ✅ 已启用自动白平衡');
+                console.log('[Camera] enabled auto white balance');
               }
               
               // If exposure is supported, set to auto
@@ -855,11 +911,11 @@ export default function Home() {
                 await videoTrack.applyConstraints({
                   advanced: [{ exposureMode: 'continuous' } as any]
                 });
-                console.log('[Camera] ✅ 已启用自动曝光');
+                console.log('[Camera] enabled auto exposure');
               }
               
             } catch (constraintError) {
-              console.warn('[Camera] 设置摄像头约束失败:', constraintError);
+              console.warn('[Camera] 璁剧疆鎽勫儚澶寸害鏉熷け璐?', constraintError);
             }
             
             setVideoReady(true);
@@ -1081,7 +1137,7 @@ export default function Home() {
 
     // Note: MediaPipe gives "original video coords" (shader uv2.y),
     // while the Three.js plane uses v_uv.y as its param.
-    // We need v_uv.y such that warp(v_uv.y) ≈ v (final line position),
+    // We need v_uv.y such that warp(v_uv.y) 鈮?v (final line position),
     // so we invert the warp to map v back to plane param coords.
     const vPlane = invertVerticalWarp(v, comp);
 
@@ -1089,16 +1145,16 @@ export default function Home() {
     const geom = mesh.geometry as THREE.PlaneGeometry;
     const planeWidth = geom.parameters.width as number;
     const planeHeight = geom.parameters.height as number;
-    // Video UV → mesh local coords (origin at video center, +X right, +Y up)
+    // Video UV 鈫?mesh local coords (origin at video center, +X right, +Y up)
     const localX = (u - 0.5) * planeWidth;
-    // const localY = (0.5 - v) * planeHeight; // v down → Three up (old)
-    const localY = (0.5 - vPlane) * planeHeight; // v down → Three up (using inverted vPlane)
+    // const localY = (0.5 - v) * planeHeight; // v down 鈫?Three up (old)
+    const localY = (0.5 - vPlane) * planeHeight; // v down 鈫?Three up (using inverted vPlane)
     const local = new THREE.Vector3(localX, localY, 0);
     // To world coordinates
     const world = local.clone().applyMatrix4(mesh.matrixWorld);
     // Project to NDC
     const ndc = world.clone().project(camera);
-    // NDC → screen pixels (using renderer canvas CSS size)
+    // NDC 鈫?screen pixels (using renderer canvas CSS size)
     const cssW = renderer.domElement.clientWidth || 500;
     const cssH = renderer.domElement.clientHeight || 500;
     const x = (ndc.x * 0.5 + 0.5) * cssW;
@@ -1175,7 +1231,7 @@ export default function Home() {
     
     if (!mesh || !pivot || !camera) return;
     
-    // Match CSS order: transform-origin: top → translate → scale/flip → rotateX
+    // Match CSS order: transform-origin: top 鈫?translate 鈫?scale/flip 鈫?rotateX
     // 1) Translate (relative to pivot, keep top pivot baseline)
     pivot.position.x = videoTranslate.x;
     pivot.position.y = threePivotBaseYRef.current - videoTranslate.y;
@@ -1526,7 +1582,7 @@ export default function Home() {
         if (!mounted) return;
         
         setHandsInstance(hands);
-        console.log('[HandDetection] ✅ MediaPipe Hands initialized');
+        console.log('[HandDetection] 鉁?MediaPipe Hands initialized');
         
         // Start processing video frames (optimize frame rate)
         let lastFrameTime = 0;
@@ -1543,7 +1599,7 @@ export default function Home() {
                 await hands.send({ image: video });
                 lastFrameTime = currentTime;
               } catch (error) {
-                console.warn('[HandDetection] 处理帧失败:', error);
+                console.warn('[HandDetection] 澶勭悊甯уけ璐?', error);
               }
             }
           }
@@ -1556,7 +1612,7 @@ export default function Home() {
         processFrame();
         
       } catch (error) {
-        console.error('[HandDetection] MediaPipe Hands 初始化失败:', error);
+        console.error('[HandDetection] MediaPipe Hands 鍒濆鍖栧け璐?', error);
         setDebugInfo(`hand detection initialization failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     };
@@ -1728,7 +1784,7 @@ export default function Home() {
         setDrawingPath(prev => {
           const newPath = [...prev, {x, y}];
           if (newPath.length % 5 === 0) { // Log every 5 points to avoid noise
-            console.log('[Drawing] 路径点数:', newPath.length, '最新点:', {x: x.toFixed(1), y: y.toFixed(1)});
+            console.log('[Drawing] 璺緞鐐规暟:', newPath.length, '鏈€鏂扮偣:', {x: x.toFixed(1), y: y.toFixed(1)});
           }
           return newPath;
         });
@@ -1765,7 +1821,7 @@ export default function Home() {
               maxLevelInSession = currentLevel;
               setCurrentMaxLevel(currentLevel); // Sync state
               console.log('[Pressure] Downgraded after stability:', currentLevel);
-              setDebugInfo(`✏️ pressure: ${p.toFixed(3)} | downgrade to: ${currentLevel} | current highest: ${maxLevelInSession}`);
+              setDebugInfo(`pressure: ${p.toFixed(3)} | downgrade to: ${currentLevel} | current highest: ${maxLevelInSession}`);
             }
           }, 500); // 0.5s stability window
           
@@ -1775,7 +1831,7 @@ export default function Home() {
         // Show downgrade countdown
         const elapsed = Date.now() - stableStartTime;
         const remaining = Math.max(0, 500 - elapsed);
-        setDebugInfo(`✏️ pressure: ${p.toFixed(3)} | current: ${currentLevel} | highest: ${maxLevelInSession} | downgrade countdown: ${(remaining/1000).toFixed(1)}s`);
+        setDebugInfo(`pressure: ${p.toFixed(3)} | current: ${currentLevel} | highest: ${maxLevelInSession} | downgrade countdown: ${(remaining/1000).toFixed(1)}s`);
         
       } else {
         // Pressure increased, cancel downgrade
@@ -1787,7 +1843,7 @@ export default function Home() {
         }
         
         // Normal display
-        setDebugInfo(`✏️ pressure: ${p.toFixed(3)} | current: ${currentLevel} | highest: ${maxLevelInSession}`);
+        setDebugInfo(`pressure: ${p.toFixed(3)} | current: ${currentLevel} | highest: ${maxLevelInSession}`);
       }
       
     };
@@ -1857,7 +1913,7 @@ export default function Home() {
     if (captureLockRef.current) { console.log('[Finger] capture busy, skip'); return; }
     captureLockRef.current = true;
     if (!selectionBounds || !videoReady || !ocrReady || !worker) {
-      console.log('[Finger] 条件不满足:', { 
+      console.log('[Finger] 鏉′欢涓嶆弧瓒?', { 
         hasSelectionBounds: !!selectionBounds, 
         videoReady, 
         ocrReady, 
@@ -1867,14 +1923,14 @@ export default function Home() {
     }
     
     if (isProcessing) {
-      console.log('[Finger] 已在处理中，跳过');
+      console.log('[Finger] 宸插湪澶勭悊涓紝璺宠繃');
       return;
     }
     setIsProcessing(true);
     
-    console.log('[Finger] 开始OCR处理，使用已截屏区域:', selectionBounds);
+    console.log('[Finger] 寮€濮婳CR澶勭悊锛屼娇鐢ㄥ凡鎴睆鍖哄煙:', selectionBounds);
     
-    setDebugInfo(`👆 finger mode: selection area ${selectionBounds.width}×${selectionBounds.height}px`);
+    setDebugInfo(`finger mode: selection area ${selectionBounds.width}x${selectionBounds.height}px`);
     
     // Use Three.js render for WYSIWYG capture
     try {
@@ -1895,11 +1951,11 @@ export default function Home() {
       const scale = isIPad ? 1.5 : 2;
       const cropCanvas = captureWYSIWYGRegionHiRes(selectionBounds, scale) || captureWYSIWYGRegion(selectionBounds);
       if (!cropCanvas) {
-        console.error('[Finger] WYSIWYG裁剪失败，画布为空');
+        console.error('[Finger] WYSIWYG crop failed: canvas was empty');
         setIsProcessing(false);
         return;
       }
-      console.log('[Finger] 手指模式截图完成（Three.js WYSIWYG）');
+      console.log('[Finger] screenshot capture completed (Three.js WYSIWYG)');
       
       // Image enhancement
       if (isEnhancementEnabled) {
@@ -1919,7 +1975,7 @@ export default function Home() {
         }
         
         ctx2d.putImageData(imageData, 0, 0);
-        console.log('[Finger] ✅ Image enhancement done');
+        console.log('[Finger] 鉁?Image enhancement done');
       }
       
       // Get processed image (WYSIWYG)
@@ -1930,21 +1986,21 @@ export default function Home() {
       }, 0);
       
       // OCR recognition
-      console.log('[Finger] 开始OCR识别...');
+      console.log('[Finger] 寮€濮婳CR璇嗗埆...');
       const { data: { text } } = await worker.recognize(cropCanvas);
       const picked = text.trim().slice(0, 400);
       
-      console.log('[Finger] OCR识别结果:', { 
+      console.log('[Finger] OCR璇嗗埆缁撴灉:', { 
         originalLength: text.length, 
         trimmedLength: picked.length, 
         text: picked 
       });
       
-      setAnswer(`👆 finger mode: call LLM... (level: ${level})\n\n识别文字: ${picked || "(未检测到文字)"}`);
+      setAnswer(`finger mode: calling LLM... (level: ${level})\n\nrecognized text: ${picked || "(no text detected)"}`);
       
       if(picked.length === 0) {
-        setAnswer("👆 finger mode: no text detected");
-        console.log('[Finger] 文本为空');
+        setAnswer("finger mode: no text detected");
+        console.log('[Finger] 鏂囨湰涓虹┖');
         return;
       }
       
@@ -1956,13 +2012,13 @@ export default function Home() {
       });
       
       if (!resp.ok) {
-        throw new Error(`LLM API 错误: ${resp.status}`);
+        throw new Error(`LLM API 閿欒: ${resp.status}`);
       }
       
       if (isStreaming) {
         // Streaming response handling
         const reader = resp.body?.getReader();
-        if (!reader) throw new Error('无法获取流式响应');
+        if (!reader) throw new Error('鏃犳硶鑾峰彇娴佸紡鍝嶅簲');
         
         setAnswer("");
         
@@ -2019,7 +2075,7 @@ export default function Home() {
                     }
                   }
                 } catch (e) {
-                  console.log('[Finger Streaming] 跳过无效行:', line);
+                  console.log('[Finger Streaming] 璺宠繃鏃犳晥琛?', line);
                 }
               }
             }
@@ -2032,8 +2088,8 @@ export default function Home() {
         const data = await resp.json();
         const content = data.content || "No response";
         
-        console.log('[Finger] LLM响应完成:', { contentLength: content.length });
-        setAnswer(`👆 finger mode: result:\n\n${content}`);
+        console.log('[Finger] LLM鍝嶅簲瀹屾垚:', { contentLength: content.length });
+        setAnswer(`finger mode: result\n\n${content}`);
         
         // Set floating panel
         if (selectionBounds) {
@@ -2057,17 +2113,17 @@ export default function Home() {
       }
       
     } catch (err: any) {
-      console.error('[Finger] 处理失败:', err);
-      setAnswer(`👆 finger mode: error: ${err?.message || String(err)}`);
+      console.error('[Finger] 澶勭悊澶辫触:', err);
+      setAnswer(`finger mode: error: ${err?.message || String(err)}`);
     } finally {
       setIsProcessing(false);
       captureLockRef.current = false;
     }
   };
 
-  // 6) Tap (PointerUp is more stable) → crop ROI → OCR → LLM
+  // 6) Tap (PointerUp is more stable) 鈫?crop ROI 鈫?OCR 鈫?LLM
   const onPointerUp = async (e: React.PointerEvent<HTMLElement>) => {
-    console.log('[Click] 检测到点击事件:', {
+    console.log('[Click] 妫€娴嬪埌鐐瑰嚮浜嬩欢:', {
       pointerType: e.pointerType,
       pressure: e.pressure,
       clientX: e.clientX,
@@ -2080,7 +2136,7 @@ export default function Home() {
     
     // Prevent duplicate processing
     if (isProcessing) {
-      console.log('[OCR] 已在处理中，跳过');
+      console.log('[OCR] 宸插湪澶勭悊涓紝璺宠繃');
       return;
     }
     setIsProcessing(true);
@@ -2098,7 +2154,7 @@ export default function Home() {
         totalDistance += Math.sqrt(dx * dx + dy * dy);
       }
       
-      console.log('[Drawing] 笔迹分析:', {
+      console.log('[Drawing] 绗旇抗鍒嗘瀽:', {
         pointCount: drawingPath.length,
         totalDistance: totalDistance.toFixed(1),
         isShortMovement: totalDistance < 30
@@ -2114,7 +2170,7 @@ export default function Home() {
           width: defaultSize,
           height: defaultSize
         };
-        console.log('[Drawing] 单点点击 (距离<30px)，使用默认区域:', bounds);
+        console.log('[Drawing] 鍗曠偣鐐瑰嚮 (璺濈<30px)锛屼娇鐢ㄩ粯璁ゅ尯鍩?', bounds);
       } else {
         // Larger movement indicates real drawing
         const xs = drawingPath.map(p => p.x);
@@ -2126,14 +2182,14 @@ export default function Home() {
           width: Math.max(...xs) - Math.min(...xs) + margin * 2,
           height: Math.max(...ys) - Math.min(...ys) + margin * 2
         };
-        console.log('[Drawing] 真实绘制 (距离≥30px)，计算边界:', bounds, '总距离:', totalDistance.toFixed(1));
+        console.log('[Drawing] 鐪熷疄缁樺埗 (璺濈鈮?0px)锛岃绠楄竟鐣?', bounds, '鎬昏窛绂?', totalDistance.toFixed(1));
       }
       
       calculatedBounds = bounds;
       setSelectionBounds(bounds);
-      console.log('[Drawing] ✅ Selection region set:', bounds);
+      console.log('[Drawing] 鉁?Selection region set:', bounds);
     } else {
-      console.log('[Drawing] ⚠️ No drawing path, clear selection region');
+      console.log('[Drawing] 鈿狅笍 No drawing path, clear selection region');
       setSelectionBounds(null);
     }
     
@@ -2147,29 +2203,29 @@ export default function Home() {
     
     if (!videoReady) { 
       setAnswer("Video is not ready, please wait..."); 
-      console.log('[Click] 视频未就绪');
+      console.log('[Click] video not ready');
       return; 
     }
     if (!ocrReady || !worker) { 
       setAnswer("OCR engine is still loading, please wait..."); 
-      console.log('[Click] OCR 未就绪');
+      console.log('[Click] OCR not ready');
       return; 
     }
 
     if (!videoReady || !ocrReady || !worker) {
-      console.log('[OCR] 未准备就绪:', { videoReady, ocrReady, hasWorker: !!worker });
+      console.log('[OCR] 鏈噯澶囧氨缁?', { videoReady, ocrReady, hasWorker: !!worker });
       return;
     } 
 
     const v = videoRef.current;
     const overlay = overlayRef.current;
     if (!v || !overlay) {
-      console.log('[OCR] 元素引用缺失');
+      console.log('[OCR] 鍏冪礌寮曠敤缂哄け');
       return;
     }
     
     // Capture directly from overlay to avoid complex coord transforms
-    console.log('[OCR] 使用overlay直接截图方法');
+    console.log('[OCR] 浣跨敤overlay鐩存帴鎴浘鏂规硶');
     
     if (!calculatedBounds || calculatedBounds.width <= 5 || calculatedBounds.height <= 5) {
       setAnswer("please use Apple Pencil to draw the area to be recognized");
@@ -2221,10 +2277,10 @@ export default function Home() {
       
       // Write processed data back to canvas
       ctx.putImageData(imageData, 0, 0);
-      console.log('[Enhancement] ✅ 图像增强完成（对比度+二值化）');
+      console.log('[Enhancement] image enhancement completed');
     };
     
-    console.log('[Click] 开始从overlay直接截图...', {
+    console.log('[Click] 寮€濮嬩粠overlay鐩存帴鎴浘...', {
       canvasSize: { width: canvas.width, height: canvas.height },
       selectionBounds: calculatedBounds
     });
@@ -2233,7 +2289,7 @@ export default function Home() {
       // Method: use getDisplayMedia or DOM snapshot
       // Easiest: draw overlay to a temp canvas, then crop
       
-      console.log('[Screenshot] 开始截取overlay区域...');
+      console.log('[Screenshot] 寮€濮嬫埅鍙杘verlay鍖哄煙...');
       
       // Collect size info for debugging
       const overlayRect = overlay.getBoundingClientRect();
@@ -2241,13 +2297,13 @@ export default function Home() {
       const videoNaturalSize = { width: v.videoWidth, height: v.videoHeight };
       const containerSize = { width: 500, height: 500 }; // Configured container size
       
-      console.log('[Debug] 尺寸对比:', {
-        蓝框区域: calculatedBounds,
-        overlay尺寸: { width: overlayRect.width, height: overlayRect.height },
-        video显示尺寸: { width: videoRect.width, height: videoRect.height },
-        video原始尺寸: videoNaturalSize,
-        容器尺寸: containerSize,
-        当前变换: { scale: videoScale, translate: videoTranslate }
+      console.log('[Debug] bounds comparison:', {
+        selectionBounds: calculatedBounds,
+        overlaySize: { width: overlayRect.width, height: overlayRect.height },
+        videoDisplaySize: { width: videoRect.width, height: videoRect.height },
+        videoNaturalSize,
+        containerSize,
+        currentTransform: { scale: videoScale, translate: videoTranslate },
       });
       
       // Create temp canvas to draw full overlay
@@ -2256,30 +2312,30 @@ export default function Home() {
       tempCanvas.height = overlayRect.height;
       const tempCtx = tempCanvas.getContext("2d")!;
       
-      console.log('[Debug] 临时Canvas尺寸:', { width: tempCanvas.width, height: tempCanvas.height });
+      console.log('[Debug] 涓存椂Canvas灏哄:', { width: tempCanvas.width, height: tempCanvas.height });
       
       // Draw video into temp canvas (with all transforms)
       tempCtx.save();
       
-      console.log('[Debug] 开始应用变换...');
+      console.log('[Debug] 寮€濮嬪簲鐢ㄥ彉鎹?..');
       
       // Apply same transforms as video
       tempCtx.translate(tempCanvas.width / 2, tempCanvas.height / 2);
-      console.log('[Debug] 1. 移动到中心:', tempCanvas.width / 2, tempCanvas.height / 2);
+      console.log('[Debug] 1. 绉诲姩鍒颁腑蹇?', tempCanvas.width / 2, tempCanvas.height / 2);
       
       tempCtx.scale(-1, 1); // Horizontal flip
-      console.log('[Debug] 2. 水平翻转');
+      console.log('[Debug] 2. 姘村钩缈昏浆');
       
       tempCtx.scale(videoScale, videoScale); // Scale
-      console.log('[Debug] 3. 缩放:', videoScale);
+      console.log('[Debug] 3. 缂╂斁:', videoScale);
       
       tempCtx.translate(videoTranslate.x, videoTranslate.y); // Translate
-      console.log('[Debug] 4. 平移:', videoTranslate.x, videoTranslate.y);
+      console.log('[Debug] 4. 骞崇Щ:', videoTranslate.x, videoTranslate.y);
       
       tempCtx.translate(-tempCanvas.width / 2, -tempCanvas.height / 2);
-      console.log('[Debug] 5. 移回原点');
-      console.log('[Debug] 注意：截图不包含透视变换（Canvas 2D限制），透视强度:', perspectiveStrength);
-      console.log('[Debug] 坐标系统已修复：透视和其他变换分离处理');
+      console.log('[Debug] 5. 绉诲洖鍘熺偣');
+      console.log('[Debug] 娉ㄦ剰锛氭埅鍥句笉鍖呭惈閫忚鍙樻崲锛圕anvas 2D闄愬埗锛夛紝閫忚寮哄害:', perspectiveStrength);
+      console.log('[Debug] coordinate system alignment updated');
       
       // Draw video preserving aspect ratio
       // Potential issue: should draw native size instead of stretching to canvas
@@ -2302,7 +2358,7 @@ export default function Home() {
         drawY = 0;
       }
       
-      console.log('[Debug] 绘制参数:', {
+      console.log('[Debug] 缁樺埗鍙傛暟:', {
         videoAspect,
         canvasAspect,
         drawArea: { x: drawX, y: drawY, width: drawWidth, height: drawHeight }
@@ -2312,10 +2368,10 @@ export default function Home() {
       tempCtx.restore();
       
       // Extract selection from temp canvas
-      console.log('[Debug] 准备提取区域:', {
-        提取坐标: calculatedBounds,
-        临时Canvas尺寸: { width: tempCanvas.width, height: tempCanvas.height },
-        最终Canvas尺寸: { width: canvas.width, height: canvas.height }
+      console.log('[Debug] preparing extraction region:', {
+        extractedBounds: calculatedBounds,
+        tempCanvasSize: { width: tempCanvas.width, height: tempCanvas.height },
+        finalCanvasSize: { width: canvas.width, height: canvas.height },
       });
       
       // Check extraction region bounds
@@ -2324,9 +2380,9 @@ export default function Home() {
       const safeWidth = Math.min(calculatedBounds.width, tempCanvas.width - safeLeft);
       const safeHeight = Math.min(calculatedBounds.height, tempCanvas.height - safeTop);
       
-      console.log('[Debug] 安全边界检查:', {
-        原始: calculatedBounds,
-        安全: { left: safeLeft, top: safeTop, width: safeWidth, height: safeHeight }
+      console.log('[Debug] safe bounds check:', {
+        original: calculatedBounds,
+        safe: { left: safeLeft, top: safeTop, width: safeWidth, height: safeHeight },
       });
       
       const selectionImageData = tempCtx.getImageData(
@@ -2336,7 +2392,7 @@ export default function Home() {
         safeHeight
       );
       
-      console.log('[Debug] 提取的ImageData:', {
+      console.log('[Debug] 鎻愬彇鐨処mageData:', {
         width: selectionImageData.width,
         height: selectionImageData.height,
         dataLength: selectionImageData.data.length
@@ -2345,24 +2401,24 @@ export default function Home() {
       // Draw extracted region onto final canvas
       ctx.putImageData(selectionImageData, 0, 0);
       
-      console.log('[Screenshot] 从overlay截图完成');
+      console.log('[Screenshot] 浠巓verlay鎴浘瀹屾垚');
       
       // Extra debug: save temp canvas for inspection
       const tempDataURL = tempCanvas.toDataURL();
-      console.log('[Debug] 临时Canvas内容长度:', tempDataURL.length);
-      console.log('[Debug] 你可以在浏览器控制台复制这个URL查看临时canvas内容:');
+      console.log('[Debug] 涓存椂Canvas鍐呭闀垮害:', tempDataURL.length);
+      console.log('[Debug] 浣犲彲浠ュ湪娴忚鍣ㄦ帶鍒跺彴澶嶅埗杩欎釜URL鏌ョ湅涓存椂canvas鍐呭:');
       console.log(tempDataURL.substring(0, 100) + '...');
       
       // Verify canvas has content
       const imageData = ctx.getImageData(0, 0, Math.min(10, canvas.width), Math.min(10, canvas.height));
       const hasContent = imageData.data.some(pixel => pixel !== 0);
-      console.log('[Click] Canvas内容检查:', { 
+      console.log('[Click] Canvas鍐呭妫€鏌?', { 
         hasContent,
         samplePixels: Array.from(imageData.data.slice(0, 12))
       });
       
       if (!hasContent) {
-        console.error('[Click] Canvas内容为空！尝试iPad备用捕获方法...');
+        console.error('[Click] Canvas鍐呭涓虹┖锛佸皾璇昳Pad澶囩敤鎹曡幏鏂规硶...');
         
         // iPad fallback: try different draw parameters
         try {
@@ -2399,10 +2455,10 @@ export default function Home() {
           );
           ctx.putImageData(roiImageData, 0, 0);
           
-          console.log('[Click] iPad备用捕获成功');
+          console.log('[Click] iPad澶囩敤鎹曡幏鎴愬姛');
           
         } catch (fallbackError: any) {
-          console.error('[Click] iPad备用捕获也失败:', fallbackError);
+          console.error('[Click] iPad澶囩敤鎹曡幏涔熷け璐?', fallbackError);
           setAnswer(`Error: All video capture methods failed - ${fallbackError.message || String(fallbackError)}`);
           setCapturedImage("");
           return;
@@ -2410,13 +2466,13 @@ export default function Home() {
       }
       
     } catch (drawError: any) {
-      console.error('[Click] 绘制视频帧到canvas时出错:', drawError);
+      console.error('[Click] 缁樺埗瑙嗛甯у埌canvas鏃跺嚭閿?', drawError);
       setAnswer(`Error: Failed to draw video frame to canvas - ${drawError.message || String(drawError)}`);
       setCapturedImage("");
       return;
     }
 
-    console.log('[Click] Canvas 创建完成，开始 OCR...', {
+    console.log('[Click] Canvas 鍒涘缓瀹屾垚锛屽紑濮?OCR...', {
       canvasSize: { width: canvas.width, height: canvas.height },
       selectionBounds: calculatedBounds,
       videoSize: { width: v.videoWidth, height: v.videoHeight }
@@ -2435,9 +2491,9 @@ export default function Home() {
     let imageDataUrl;
     try {
       imageDataUrl = cropSource.toDataURL();
-      console.log('[Click] WYSIWYG截图成功，长度:', imageDataUrl.length);
+      console.log('[Click] WYSIWYG鎴浘鎴愬姛锛岄暱搴?', imageDataUrl.length);
     } catch (e: any) {
-      console.error('[Click] DataURL失败:', e);
+      console.error('[Click] DataURL澶辫触:', e);
       setIsProcessing(false);
       return;
     }
@@ -2446,9 +2502,9 @@ export default function Home() {
     if (isEnhancementEnabled) {
       const ctx = cropSource.getContext('2d')!;
       enhanceImage(cropSource, ctx);
-      console.log('[Enhancement] ✅ 图像增强已应用');
+      console.log('[Enhancement] image enhancement enabled');
     } else {
-      console.log('[Enhancement] ⚪ 图像增强已禁用');
+      console.log('[Enhancement] image enhancement disabled');
     }
     
     // Get processed image for display
@@ -2456,12 +2512,12 @@ export default function Home() {
       try { setCapturedImage(imageDataUrl); } catch {}
     }, 0);
     
-    console.log('[Enhancement] 图像增强完成，开始OCR识别...');
+    console.log('[Enhancement] 鍥惧儚澧炲己瀹屾垚锛屽紑濮婳CR璇嗗埆...');
 
     try {
       const { data: { text } } = await worker.recognize(cropSource);
       const picked = text.trim().slice(0, 400);
-      console.log('[OCR] 识别结果:', { 
+      console.log('[OCR] 璇嗗埆缁撴灉:', { 
         originalLength: text.length, 
         trimmedLength: picked.length, 
         text: picked 
@@ -2471,7 +2527,7 @@ export default function Home() {
       setDebugInfo(`pressure level: ${level})\n\nrecognized text: ${picked || "(no text detected)"}`);
       if(picked.length === 0) {
         setAnswer("no text detected");
-        console.log('[OCR] 文本为空，可能原因：图像质量、光线、角度、或该区域确实没有文字');
+        console.log('[OCR] recognized text was empty; image quality or region may be the cause');
         return;
       }
 
@@ -2482,17 +2538,17 @@ export default function Home() {
         body: JSON.stringify({ text: picked || "No text", level, image: imageDataUrl, streaming: isStreaming }),
       });
 
-      console.log('[LLM] API 调用状态:', resp.status);
+      console.log('[LLM] API 璋冪敤鐘舵€?', resp.status);
 
       if (!resp.ok) {
-        throw new Error(`LLM API 错误: ${resp.status}`);
+        throw new Error(`LLM API 閿欒: ${resp.status}`);
       }
 
       if (isStreaming) {
         // Handle streaming response
         const reader = resp.body?.getReader();
         if (!reader) {
-          throw new Error('无法获取流式响应');
+          throw new Error('鏃犳硶鑾峰彇娴佸紡鍝嶅簲');
         }
 
         setAnswer(""); // Clear previous answer
@@ -2560,7 +2616,7 @@ export default function Home() {
                     }
                   }
                 } catch (e) {
-                  console.log('[Streaming] 跳过无效行:', line);
+                  console.log('[Streaming] 璺宠繃鏃犳晥琛?', line);
                 }
               }
             }
@@ -2573,7 +2629,7 @@ export default function Home() {
         const data = await resp.json();
         const content = data.content || "No response";
         
-        console.log('[LLM] 响应完成:', { contentLength: content.length });
+        console.log('[LLM] 鍝嶅簲瀹屾垚:', { contentLength: content.length });
         setAnswer(content);
         
         // Set floating panel position (beside selection)
@@ -2617,22 +2673,22 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-white p-4">
    
-      <h1 className="text-xl font-semibold mb-3 text-gray-600">PressureLens — Web</h1>
+      <h1 className="text-xl font-semibold mb-3 text-gray-600">PressureLens - Web</h1>
 
       <div className="mb-2 text-sm text-gray-600">
-        Video: {videoReady ? "✅ ready" : "⏳ loading"} ·
-        OCR: {ocrReady ? "✅ ready" : "⏳ loading"} ·
+        Video: {videoReady ? "ready" : "loading"} |
+        OCR: {ocrReady ? "ready" : "loading"} |
         Level: <b className={
           level==="light" ? "text-green-600" :
           level==="medium" ? "text-amber-600" : "text-red-600"
         }>{level}</b>
         {isUsingPen && currentPressure > 0 && (
           <span className="ml-2 text-blue-600">
-            ✏️ Apple Pencil pressure: <b>{currentPressure.toFixed(3)}{drawingPath.length}</b>
+            Apple Pencil pressure: <b>{currentPressure.toFixed(3)}{drawingPath.length}</b>
           </span>
         )}
-        {debugInfo && <div className="mt-1 text-xs text-blue-600">🔍 {debugInfo}</div>}
-        {/* {deviceInfo && <div className="mt-1 text-xs text-purple-600">📱 {deviceInfo}</div>} */}
+        {debugInfo && <div className="mt-1 text-xs text-blue-600">[Debug] {debugInfo}</div>}
+        {/* {deviceInfo && <div className="mt-1 text-xs text-purple-600">馃摫 {deviceInfo}</div>} */}
         <button
           onClick={() => sessionLogger.exportJson(deviceInfo)}
           className="ml-auto px-3 py-1 rounded text-xs bg-black text-white hover:bg-gray-900"
@@ -2651,7 +2707,7 @@ export default function Home() {
               isLoggingEnabled ? "bg-emerald-500 text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"
             }`}
           >
-            {isLoggingEnabled ? "✅ on" : "⏸️ off"}
+            {isLoggingEnabled ? "on" : "off"}
           </button>
         </div>
         <div className="text-xs text-gray-600">
@@ -2659,9 +2715,9 @@ export default function Home() {
             const s = sessionLogger.getSummary();
             return (
               <>
-                samples: <span className="font-semibold">{s.pointerSamples}</span> ·
-                voice: <span className="font-semibold ml-1">{s.voiceAnnotations}</span> ·
-                selected topics: <span className="font-semibold ml-1">{s.selectedTopics}</span> ·
+                samples: <span className="font-semibold">{s.pointerSamples}</span> |
+                voice: <span className="font-semibold ml-1">{s.voiceAnnotations}</span> |
+                selected topics: <span className="font-semibold ml-1">{s.selectedTopics}</span> |
                 page topics: <span className="font-semibold ml-1">{s.hasPageOcr ? "yes" : "no"}</span>
               </>
             );
@@ -2757,7 +2813,7 @@ export default function Home() {
               : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
           }`}
         >
-          {isInterestDetectionEnabled ? '✅ enabled' : '⏸️ enabled'}
+          {isInterestDetectionEnabled ? 'enabled' : 'disabled'}
         </button>
         {isInterestDetectionEnabled && (
           <div className="text-xs text-purple-600 ml-2">
@@ -2766,7 +2822,7 @@ export default function Home() {
         )}
         {/* {isInterestDetectionEnabled && (
           <div className="text-xs text-purple-600 ml-2">
-            当前兴趣度: {currentInterestScore.toFixed(1)}%
+            褰撳墠鍏磋叮搴? {currentInterestScore.toFixed(1)}%
           </div>
         )} */}
       </div>
@@ -2782,7 +2838,7 @@ export default function Home() {
               : "bg-gray-200 text-gray-700 hover:bg-gray-300"
           }`}
         >
-          {isFingerLongPressLLMEnabled ? "✅ enabled" : "⏸️ disabled"}
+          {isFingerLongPressLLMEnabled ? "enabled" : "disabled"}
         </button>
         <span className="text-xs text-gray-500">
           {isFingerLongPressLLMEnabled
@@ -2797,32 +2853,31 @@ export default function Home() {
       {/* {handDetectionMode === 'finger' && (
         <div className="mb-3 p-3 bg-green-50 rounded-lg border border-green-200">
           <div className="text-sm text-green-700 mb-2">
-            📷 长按模式: {fingerTipPosition ? '✅ 检测到手指' : '⏳ 寻找手指中...'}
+            馃摲 闀挎寜妯″紡: {fingerTipPosition ? '鉁?妫€娴嬪埌鎵嬫寚' : '鈴?瀵绘壘鎵嬫寚涓?..'}
             {fingerTipPosition && (
               <span className="ml-2">
-               位置: ({fingerTipPosition.x.toFixed(0)}, {fingerTipPosition.y.toFixed(0)})
+               浣嶇疆: ({fingerTipPosition.x.toFixed(0)}, {fingerTipPosition.y.toFixed(0)})
               </span>
             )}
           </div>
           <div className="text-xs text-gray-600 mb-2">
-            💡 将手指指向纸面文字并保持不动，系统会根据停留时间自动选择详细程度：
-            <br/>• 0.8-2.0秒: Light级别 (简单回答)
-            <br/>• 2.0-3.5秒: Medium级别 (正常详细度) 
-            <br/>• 3.5秒以上: Hard级别 (详细分析+建议)
+            馃挕 灏嗘墜鎸囨寚鍚戠焊闈㈡枃瀛楀苟淇濇寔涓嶅姩锛岀郴缁熶細鏍规嵁鍋滅暀鏃堕棿鑷姩閫夋嫨璇︾粏绋嬪害锛?            <br/>鈥?0.8-2.0绉? Light绾у埆 (绠€鍗曞洖绛?
+            <br/>鈥?2.0-3.5绉? Medium绾у埆 (姝ｅ父璇︾粏搴? 
+            <br/>鈥?3.5绉掍互涓? Hard绾у埆 (璇︾粏鍒嗘瀽+寤鸿)
           </div>
           
           {longPressState.isActive && (
             <div className="mt-2 p-2 bg-white rounded border">
               <div className="text-xs text-gray-700">
-                🔄 长按进行中: <span className="font-bold text-blue-600">{longPressState.currentLevel}</span> 级别
-                <span className="ml-2">({(longPressState.currentDuration / 1000).toFixed(1)}秒)</span>
-                {longPressRef.current.hasTriggered && <span className="ml-2 text-green-600">✅ 已触发</span>}
+                馃攧 闀挎寜杩涜涓? <span className="font-bold text-blue-600">{longPressState.currentLevel}</span> 绾у埆
+                <span className="ml-2">({(longPressState.currentDuration / 1000).toFixed(1)}绉?</span>
+                {longPressRef.current.hasTriggered && <span className="ml-2 text-green-600">鉁?宸茶Е鍙?/span>}
               </div>
               <div className="text-xs text-gray-500 mt-1">
                 {longPressState.currentLevel === 'hard' && !longPressRef.current.hasTriggered ? 
-                  '⚡ 即将自动触发OCR...' :
+                  '鈿?鍗冲皢鑷姩瑙﹀彂OCR...' :
                   longPressState.currentDuration >= longPressConfig.autoTriggerDelay ?
-                  '👆 移开手指确认当前级别' : '⏳ 继续按住提升级别'
+                  '馃憜 绉诲紑鎵嬫寚纭褰撳墠绾у埆' : '鈴?缁х画鎸変綇鎻愬崌绾у埆'
                 }
               </div>
             </div>
@@ -2969,7 +3024,7 @@ export default function Home() {
               : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
           }`}
         >
-          {isStreaming ? '🔄 streaming' : '📄 instant'}
+          {isStreaming ? 'streaming' : 'instant'}
         </button>
       </div>
 
@@ -2984,7 +3039,7 @@ export default function Home() {
               : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
           }`}
         >
-          {isEnhancementEnabled ? '✨ enhanced' : '📸 original'}
+          {isEnhancementEnabled ? 'enhanced' : 'original'}
         </button>
         <span className="text-xs text-gray-500">
           {isEnhancementEnabled ? '(contrast + grayscale + binarization)' : '(raw camera image)'}
@@ -3016,7 +3071,7 @@ export default function Home() {
                   const i = parseInt(e.target.value);
                   const val = opts[i];
                   setWarpCompensation(val);
-                  // setDebugInfo(`🔧 warp: ${i===0?'0':i===1?'0.18':'0.5'} (${val.toFixed(2)})`);
+                  // setDebugInfo(`馃敡 warp: ${i===0?'0':i===1?'0.18':'0.5'} (${val.toFixed(2)})`);
                 }}
                 className="w-32 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
                 style={{
@@ -3074,7 +3129,7 @@ export default function Home() {
             onChange={(e) => {
               const value = parseInt(e.target.value);
               setPerspectiveStrength(value);
-              setDebugInfo(`🔄 perspective strength: ${value}% (${(value * 0.3).toFixed(1)}度)`);
+              setDebugInfo(`perspective strength: ${value}% (${(value * 0.3).toFixed(1)}deg)`);
             }}
             className="w-32 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
             style={{
@@ -3133,10 +3188,10 @@ export default function Home() {
           onPointerUp={(e) => {
             // Only Apple Pencil triggers OCR
             if (e.pointerType === "pen") {
-              console.log('[Events] Apple Pencil PointerUp - 触发OCR');
+              console.log('[Events] Apple Pencil PointerUp - 瑙﹀彂OCR');
               onPointerUp(e);
             } else {
-              console.log('[Events] 非Apple Pencil事件，跳过OCR:', e.pointerType);
+              console.log('[Events] 闈濧pple Pencil浜嬩欢锛岃烦杩嘜CR:', e.pointerType);
             }
           }}
           onPointerDown={(e) => {
@@ -3153,16 +3208,16 @@ export default function Home() {
             
             if (e.pointerType === "pen") {
               // Apple Pencil - drawing only, no drag
-              console.log('[Pencil] Apple Pencil按下，准备绘制');
-              setDebugInfo(`✏️ Apple Pencil: pressure:${e.pressure?.toFixed(2) || 'N/A'}`);
+              console.log('[Pencil] Apple Pencil down, preparing to draw');
+              setDebugInfo(`Apple Pencil: pressure ${e.pressure?.toFixed(2) || 'N/A'}`);
             } else if (e.pointerType === "touch") {
               // Finger - used for zoom/drag
-              console.log('[Finger] 手指按下，准备手势操作');
+              console.log('[Finger] finger down, preparing gesture input');
               (e.currentTarget as any).lastPointerX = e.clientX;
               (e.currentTarget as any).lastPointerY = e.clientY;
               (e.currentTarget as any).initialTranslate = {...videoTranslate};
               (e.currentTarget as any).fingerPointerId = e.pointerId;
-              setDebugInfo(`👆 finger down: (${e.clientX.toFixed(0)}, ${e.clientY.toFixed(0)})`);
+              setDebugInfo(`finger down: (${e.clientX.toFixed(0)}, ${e.clientY.toFixed(0)})`);
             }
           }}
           onTouchStart={(e) => {
@@ -3176,8 +3231,8 @@ export default function Home() {
               );
               (e.currentTarget as any).initialDistance = distance;
               (e.currentTarget as any).initialScale = videoScale;
-              console.log('[Zoom] 双指缩放开始:', { distance, currentScale: videoScale });
-              setDebugInfo(`🔍 zoom start (${distance.toFixed(0)}px)`);
+              console.log('[Zoom] 鍙屾寚缂╂斁寮€濮?', { distance, currentScale: videoScale });
+              setDebugInfo(`zoom start (${distance.toFixed(0)}px)`);
             }
           }}
           onPointerMove={(e) => {
@@ -3203,7 +3258,7 @@ export default function Home() {
                   x: initialTranslate.x - deltaX / videoScale, // Note the minus sign
                   y: initialTranslate.y + deltaY / videoScale
                 });
-                setDebugInfo(`📱 finger drag: (${deltaX.toFixed(0)}, ${deltaY.toFixed(0)}) zoom:${(videoScale * 100).toFixed(0)}%`);
+                setDebugInfo(`finger drag: (${deltaX.toFixed(0)}, ${deltaY.toFixed(0)}) zoom:${(videoScale * 100).toFixed(0)}%`);
               }
             }
           }}
@@ -3226,8 +3281,8 @@ export default function Home() {
                 const scaleChange = distance / initialDistance;
                 const newScale = Math.max(0.1, Math.min(10, initialScale * scaleChange));
                 setVideoScale(newScale);
-                setDebugInfo(`🔍 zoom: ${(newScale * 100).toFixed(0)}%`);
-                console.log('[Zoom] 双指缩放:', newScale);
+                setDebugInfo(`zoom: ${(newScale * 100).toFixed(0)}%`);
+                console.log('[Zoom] 鍙屾寚缂╂斁:', newScale);
               }
             }
             // Remove single-finger drag; use PointerMove instead
@@ -3235,7 +3290,7 @@ export default function Home() {
           onTouchEnd={(e) => {
             if (e.touches.length === 0) {
               // All fingers lifted
-              setDebugInfo(`✅ zoom: ${(videoScale * 100).toFixed(0)}%`);
+              setDebugInfo(`zoom: ${(videoScale * 100).toFixed(0)}%`);
             }
           }}
           className="absolute inset-0 z-10 cursor-crosshair select-none"
@@ -3378,7 +3433,7 @@ export default function Home() {
                     >
                       {longPressState.isActive ? 
                         `${longPressState.currentLevel} (${(longPressState.currentDuration / 1000).toFixed(1)}s)` :
-                        `selection area ${previewArea.width}×${previewArea.height}`
+                        `selection area ${previewArea.width}x${previewArea.height}`
                       }
                     </div>
                   </div>
@@ -3449,7 +3504,7 @@ export default function Home() {
                     transform: 'translateX(-50%)'
                   }}
                 >
-                  兴趣度: {currentInterestScore.toFixed(1)}%
+                  鍏磋叮搴? {currentInterestScore.toFixed(1)}%
                 </div>
               )} */}
 
@@ -3468,7 +3523,7 @@ export default function Home() {
                   }}
                 >
                   <div className="absolute -top-6 left-1/2 transform -translate-x-1/2 bg-purple-500 text-white text-xs px-2 py-1 rounded">
-                    热点 {area.score.toFixed(0)}%
+                    鐑偣 {area.score.toFixed(0)}%
                   </div>
                 </div>
               ))} */}
@@ -3548,7 +3603,7 @@ export default function Home() {
                 (e.currentTarget as any).dragStartY = e.clientY;
                 (e.currentTarget as any).initialX = floatingResponse.position.x;
                 (e.currentTarget as any).initialY = floatingResponse.position.y;
-                console.log('[Float] 开始拖拽浮窗');
+                console.log('[Float] started dragging floating response');
                 e.preventDefault();
               }
             }}
@@ -3576,13 +3631,13 @@ export default function Home() {
             onPointerUp={() => {
               if (isDraggingFloat) {
                 setIsDraggingFloat(false);
-                console.log('[Float] 结束拖拽浮窗');
+                console.log('[Float] 缁撴潫鎷栨嫿娴獥');
               }
             }}
             onPointerLeave={() => {
               if (isDraggingFloat) {
                 setIsDraggingFloat(false);
-                console.log('[Float] 拖拽浮窗离开区域');
+                console.log('[Float] 鎷栨嫿娴獥绂诲紑鍖哄煙');
               }
             }}
           >
@@ -3593,19 +3648,19 @@ export default function Home() {
                 <button
                   onClick={() => {
                     setFloatingResponse(null);
-                    console.log('[Float] 关闭浮窗');
+                    console.log('[Float] 鍏抽棴娴獥');
                   }}
                   className="text-gray-400 hover:text-white transition-colors w-4 h-4 flex items-center justify-center rounded hover:bg-gray-700"
-                  title="关闭"
+                  title="Close"
                 >
-                  ×
+                  x
                 </button>
               </div>
               
               {/* Content area */}
               <div className="p-2 pt-1">
                 <div className="whitespace-pre-wrap max-h-32 overflow-y-auto">
-                  {floatingResponse.text || "正在分析..."}
+                  {floatingResponse.text || "Analyzing..."}
                 </div>
               </div>
               
@@ -3634,11 +3689,13 @@ export default function Home() {
           onClick={() => {
             sessionLogger.reset();
             sessionLogger.resetSessionIds();
+            resetTopicRanking();
+            setRankingSessionId(sessionLogger.getSummary().sessionId);
             setPageIndex(1);
           }}
           className="px-3 py-2 rounded-md border"
         >
-          重置Session IDs
+          Reset Session IDs
         </button>
         <button
           onClick={resetSessionForNewPage}
@@ -3658,7 +3715,7 @@ export default function Home() {
       {/* Region OCR debug: show image/text from OCR Region button */}
       {(regionCapturedImage || regionRecognizedText) && (
         <div className="mt-2 p-3 rounded-lg border bg-white max-w-md">
-          <div className="font-medium mb-2">🧪 Region OCR Debug</div>
+          <div className="font-medium mb-2">Region OCR Debug</div>
           {regionCapturedImage && (
             <img
               src={regionCapturedImage}
@@ -3688,7 +3745,7 @@ export default function Home() {
       {/* Show captured image */}
       {capturedImage && (
         <div className="mt-4 p-3 rounded-lg border bg-white max-w-md">
-          <div className="font-medium mb-2">📸 Captured Image (for OCR)</div>
+          <div className="font-medium mb-2">Captured Image (for OCR)</div>
           <img 
             src={capturedImage} 
             alt="Captured ROI for OCR" 
@@ -3700,7 +3757,7 @@ export default function Home() {
           </div>
           {selectionBounds && (
             <div className="text-xs text-blue-600 mt-1">
-              ROI: {selectionBounds.width.toFixed(0)}×{selectionBounds.height.toFixed(0)}px 
+              ROI: {selectionBounds.width.toFixed(0)}x{selectionBounds.height.toFixed(0)}px 
               (x: {selectionBounds.left.toFixed(0)}, y: {selectionBounds.top.toFixed(0)})
             </div>
           )}
@@ -3742,7 +3799,7 @@ export default function Home() {
               type="button"
               className="ml-2 w-6 h-6 flex items-center justify-center rounded-full bg-gray-200 text-[10px] text-gray-700 hover:bg-gray-300"
             >
-              {isTopicsPanelOpen ? "−" : "+"}
+              {isTopicsPanelOpen ? "-" : "+"}
             </button>
           </div>
 
@@ -3770,45 +3827,89 @@ export default function Home() {
                   </div>
                 )}
 
+                {(topicRankingModel || isTopicRankingLoading) && (
+                  <div className="mb-1 text-[10px] text-gray-500">
+                    ranking: {isTopicRankingLoading ? "updating..." : topicRankingModel ?? "ready"}
+                  </div>
+                )}
+
+                {topicRankingError && (
+                  <div className="mb-1 text-[10px] text-amber-600">
+                    {topicRankingError}
+                  </div>
+                )}
+
+                {topRankedTopics.length > 0 && (
+                  <div className="mb-2 rounded-lg border border-emerald-100 bg-emerald-50/70 p-2">
+                    <div className="text-[10px] font-medium uppercase tracking-wide text-emerald-700">
+                      Top 3 now
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {topRankedTopics.map((topic) => (
+                        <button
+                          key={`ranked-${topic.rank}-${topic.text}`}
+                          type="button"
+                          onClick={() => {
+                            handleTopicSelection(topic.text, "page_topic");
+                          }}
+                          className="rounded border border-emerald-300 bg-white px-2 py-1 text-[11px] text-emerald-900 hover:bg-emerald-100"
+                        >
+                          <span className="font-semibold">#{topic.rank} {topic.text}</span>
+                          <span className="ml-1 text-[10px] text-emerald-700">
+                            {topic.score.toFixed(2)}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {topicRankingDebug && (
+                  <div className="mb-2 rounded border border-dashed border-gray-200 bg-gray-50 p-2 text-[10px] text-gray-600">
+                    <div>
+                      focus: {topicRankingDebug.focusTexts.length > 0 ? topicRankingDebug.focusTexts.join(" | ") : "-"}
+                    </div>
+                    <div className="mt-1">
+                      samples: {topicRankingDebug.pointerCount} · norm: {topicRankingDebug.focusNorm.toFixed(2)} · history: {topicRankingDebug.historyUsed ? "yes" : "no"}
+                    </div>
+                  </div>
+                )}
+
                 {regionTopics && regionTopics.length > 0 ? (
                   <div className="flex flex-wrap gap-2 mt-1">
-                    {regionTopics.map((t, i) => (
-                      <button
-                        key={i}
-                        type="button"
-                        onClick={() => {
-                          const id = `topic-${Date.now()}-${i}-${Math.random()
-                            .toString(36)
-                            .slice(2, 6)}`;
-                          sessionLogger.addSelectedTopic({
-                            id,
-                            timestamp: Date.now(),
-                            text: t,
-                            source: "page_topic",
-                          });
-                          setLastSelectedTopic(t);
-                          explainTopicMeaning(t, { kind: "topic" });
-                          setTimeout(() => setLastSelectedTopic(null), 1500);
-                        }}
-                        className="px-2 py-1 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 text-[11px]"
-                      >
-                        <span className="font-semibold">{t}</span>
-                        {/* {typeof t.weight === "number" && (
-                          <span className="ml-1 text-gray-500">
-                            ({t.weight.toFixed(2)})
-                          </span>
-                        )}
-                        {t.category && (
-                          <span className="ml-1 text-gray-400">
-                            [{t.category}]
-                          </span>
-                        )} */}
-                      </button>
-                    ))}
+                    {regionTopics.map((t, i) => {
+                      const rankedTopic = rankedTopicMap.get(normalizeTopicKey(t));
+                      const isTopPick = rankedTopic?.rank === 1;
+                      const isRecommended = (rankedTopic?.rank ?? Infinity) <= 3;
+
+                      return (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => {
+                            handleTopicSelection(t, "page_topic");
+                          }}
+                          className={`px-2 py-1 rounded border text-[11px] ${
+                            isTopPick
+                              ? "border-emerald-500 bg-emerald-50"
+                              : isRecommended
+                              ? "border-sky-400 bg-sky-50"
+                              : "border-gray-300 bg-gray-50 hover:bg-gray-100"
+                          }`}
+                        >
+                          <span className="font-semibold">{t}</span>
+                          {rankedTopic && (
+                            <span className="ml-1 text-[10px] text-gray-500">
+                              #{rankedTopic.rank} {rankedTopic.score.toFixed(2)}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className="mt-1 text-[10px] text-gray-400">
-                    no topics yet — run OCR first
+                    no topics yet - run OCR first
                   </div>
                 )}
               </div>
@@ -3816,7 +3917,7 @@ export default function Home() {
               {/* Voice topic recorder */}
               <div className="border-t border-dashed border-gray-200 pt-2 mt-1">
                 <div className="text-[11px] text-gray-600 mb-1">
-                  🎙️ press &amp; speak (save as topic)
+                  Press and speak (save as topic)
                 </div>
                 <VoiceTopicRecorder
                   onAnnotation={(ann) => {
@@ -3825,17 +3926,7 @@ export default function Home() {
                     // Also record voice transcript as a selected topic
                     if (ann.transcript && ann.transcript.trim()) {
                       const topicText = ann.transcript.trim();
-                      sessionLogger.addSelectedTopic({
-                        id: `voice-topic-${ann.timestampStart}-${Math.random()
-                          .toString(36)
-                          .slice(2, 6)}`,
-                        timestamp: ann.timestampEnd,
-                        text: topicText,
-                        source: "voice",
-                      });
-                      setLastSelectedTopic(topicText);
-                      explainTopicMeaning(topicText, { kind: "topic" });
-                      setTimeout(() => setLastSelectedTopic(null), 1500);
+                      handleTopicSelection(topicText, "voice", ann.timestampEnd);
                     }
                   }}
                 />
@@ -3849,7 +3940,7 @@ export default function Home() {
       <div className="mt-4 flex gap-2 flex-wrap">
         <button
           onClick={async () => {
-            console.log('[Test] 测试 OCR 功能');
+            console.log('[Test] 娴嬭瘯 OCR 鍔熻兘');
             setDebugInfo('test mode: simulate click');
             if (!ocrReady || !worker) {
               setAnswer("OCR not ready");
@@ -3871,24 +3962,24 @@ export default function Home() {
               setAnswer("test OCR...");
               const { data: { text } } = await worker.recognize(canvas);
               setAnswer(`test success! recognized text: "${text.trim()}"`);
-              console.log('[Test] OCR 测试成功:', text);
+              console.log('[Test] OCR 娴嬭瘯鎴愬姛:', text);
             } catch (err: any) {
               setAnswer(`test failed: ${err.message}`);
-              console.error('[Test] OCR 测试失败:', err);
+              console.error('[Test] OCR 娴嬭瘯澶辫触:', err);
             }
           }}
           className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
         >
-          🧪 test OCR
+          Test OCR
         </button>
         
        
         {/* <button
           onClick={testWebGLScreenshot}
           className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
-          title="Three.js 3D渲染截图（真实3D变换，iPad兼容）"
+          title="Three.js 3D娓叉煋鎴浘锛堢湡瀹?D鍙樻崲锛宨Pad鍏煎锛?
         >
-          🎮 test Three.js
+          馃幃 test Three.js
         </button> */}
         
         <button
@@ -3896,7 +3987,7 @@ export default function Home() {
             setDebugInfo('');
             setAnswer('');
             setFloatingResponse(null); // Clear floating panel
-            console.log('[Test] 清除调试信息');
+            console.log('[Test] 娓呴櫎璋冭瘯淇℃伅');
           }}
           className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 text-sm"
         >
@@ -3908,12 +3999,12 @@ export default function Home() {
             setVideoScale(1);
             setVideoTranslate({x: 0, y: 0});
             setPerspectiveStrength(0);
-            setDebugInfo('🔄 reset');
-            console.log('[Reset] 重置缩放、位置和透视');
+            setDebugInfo('reset view');
+            console.log('[Reset] 閲嶇疆缂╂斁銆佷綅缃拰閫忚');
           }}
           className="px-4 py-2 bg-indigo-500 text-white rounded hover:bg-indigo-600 text-sm"
         >
-          🔄 reset
+          Reset view
         </button>
         
         
@@ -3927,35 +4018,35 @@ export default function Home() {
                 setDrawingPath([]);
                 setSelectionBounds(null);
                 setCapturedImage("");
-                console.log('[Video] 恢复视频播放');
+                console.log('[Video] 鎭㈠瑙嗛鎾斁');
               }
             }}
             className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 text-sm"
           >
-            ▶️ reset
+            Resume video
           </button>
         )}
       </div>
 
       {/* iPad event test area */}
       {/* <div className="mt-4 p-4 border border-dashed border-gray-300 rounded-lg bg-yellow-50">
-        <div className="text-sm font-medium mb-2"> iPad 事件测试区域</div>
+        <div className="text-sm font-medium mb-2"> iPad 浜嬩欢娴嬭瘯鍖哄煙</div>
         <div
           onPointerDown={(e) => {
             console.log('[TestArea] PointerDown:', e.pointerType, e.pressure);
-            setDebugInfo(`测试区 PointerDown: ${e.pointerType}`);
+            setDebugInfo(`娴嬭瘯鍖?PointerDown: ${e.pointerType}`);
           }}
           onPointerUp={(e) => {
             console.log('[TestArea] PointerUp:', e.pointerType, e.pressure);
-            setDebugInfo(`测试区 PointerUp: ${e.pointerType} - 事件正常！`);
+            setDebugInfo(`娴嬭瘯鍖?PointerUp: ${e.pointerType} - 浜嬩欢姝ｅ父锛乣);
           }}
           onTouchStart={(e) => {
             console.log('[TestArea] TouchStart:', e.touches.length);
-            setDebugInfo(`测试区 TouchStart: ${e.touches.length} 触点`);
+            setDebugInfo(`娴嬭瘯鍖?TouchStart: ${e.touches.length} 瑙︾偣`);
           }}
           onTouchEnd={(e) => {
             console.log('[TestArea] TouchEnd:', e.changedTouches.length);
-            setDebugInfo(`测试区 TouchEnd: ${e.changedTouches.length} 触点 - 事件正常！`);
+            setDebugInfo(`娴嬭瘯鍖?TouchEnd: ${e.changedTouches.length} 瑙︾偣 - 浜嬩欢姝ｅ父锛乣);
           }}
           className="w-full h-20 bg-white border rounded cursor-pointer flex items-center justify-center text-gray-600"
           style={{
@@ -3964,10 +4055,10 @@ export default function Home() {
             WebkitUserSelect: 'none'
           }}
         >
-          点击这里测试事件是否正常 (手指/Apple Pencil)
+          鐐瑰嚮杩欓噷娴嬭瘯浜嬩欢鏄惁姝ｅ父 (鎵嬫寚/Apple Pencil)
         </div>
         <div className="text-xs text-gray-500 mt-1">
-          如果这个区域能检测到点击，说明事件系统正常，问题可能在视频覆盖层
+          濡傛灉杩欎釜鍖哄煙鑳芥娴嬪埌鐐瑰嚮锛岃鏄庝簨浠剁郴缁熸甯革紝闂鍙兘鍦ㄨ棰戣鐩栧眰
         </div>
       </div> */}
 
@@ -3976,7 +4067,7 @@ export default function Home() {
       {/* Show WebGL test screenshot */}
       {webglScreenshot && (
         <div className="mt-4 p-3 rounded-lg border bg-white max-w-md">
-          <div className="font-medium mb-2">🎮 Three.js 3D渲染截图</div>
+          <div className="font-medium mb-2">Three.js 3D Render Screenshot</div>
           <img 
             src={webglScreenshot} 
             alt="Three.js 3D Render Screenshot" 
@@ -3984,10 +4075,10 @@ export default function Home() {
             style={{ maxHeight: '300px' }}
           />
           <div className="text-xs text-gray-500 mt-1">
-            使用Three.js进行真实3D渲染，完全等同于你看到的效果（包含视频、选择框、长按进度环等所有元素）
+            This screenshot is captured from the Three.js WYSIWYG render, including the video, overlays, and current interaction state.
           </div>
           <div className="text-xs text-blue-600 mt-1">
-            ✅ iPad完美兼容 | ✅ 真实3D透视变换 | ✅ 2倍高分辨率 | ✅ 硬件加速 | ✅ 包含所有overlay元素
+            iPad friendly | True 3D perspective transform | High-resolution capture | Hardware accelerated | Includes overlay elements
           </div>
           <button
             onClick={() => setWebglScreenshot("")}
@@ -4001,3 +4092,18 @@ export default function Home() {
     </main>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
