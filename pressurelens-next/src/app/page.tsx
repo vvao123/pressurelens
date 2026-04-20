@@ -6,6 +6,7 @@ import * as THREE from "three";
 import { sessionLogger } from "../lib/logging/sessionLogger";
 import { getNearestOcrWord } from "../lib/logging/nearestWord";
 import type { PointerSampleInput, VoiceAnnotation, NearestWordInfo } from "../lib/logging/types";
+import PressureInferenceOverlay from "../components/PressureInferenceOverlay";
 import VoiceTopicRecorder from "../components/VoiceTopicRecorder";
 import { useTopicRanking } from "../lib/topicRanking/useTopicRanking";
 
@@ -337,6 +338,7 @@ export default function Home() {
   // Hand detection state
   const [handResults, setHandResults] = useState<any>(null); // MediaPipe detection results
   const [fingerTipPosition, setFingerTipPosition] = useState<{x: number, y: number} | null>(null); // Fingertip position
+  const [fingerTipUv, setFingerTipUv] = useState<{u: number, v: number} | null>(null); // Fingertip uv on the raw video
   const [isHandDetectionEnabled, setIsHandDetectionEnabled] = useState<boolean>(true); // Enable hand detection
   const [handDetectionMode, setHandDetectionMode] = useState<'pencil' | 'finger'>('finger'); // Input mode
   const [handsInstance, setHandsInstance] = useState<any>(null); // MediaPipe Hands instance
@@ -1305,6 +1307,7 @@ export default function Home() {
       }
       setHandResults(null);
       setFingerTipPosition(null);
+      setFingerTipUv(null);
       return;
     }
 
@@ -1384,8 +1387,16 @@ export default function Home() {
               
               // Use Three.js projection to get overlay pixel coords
               const projected = projectVideoUVToOverlay(fingerTip.x, fingerTip.y);
-              if (!projected) return;
+              if (!projected) {
+                setFingerTipPosition(null);
+                setFingerTipUv(null);
+                return;
+              }
               let { x, y } = projected;
+              setFingerTipUv({
+                u: Math.min(1, Math.max(0, fingerTip.x)),
+                v: Math.min(1, Math.max(0, fingerTip.y)),
+              });
 
               // Visual compensation for lower fingertip:
               // - MediaPipe fingerTip.y is 0~1 (0=top, 1=bottom)
@@ -1553,6 +1564,7 @@ export default function Home() {
             }
           } else {
             setFingerTipPosition(null);
+            setFingerTipUv(null);
             // Reset long-press state when finger disappears
             const shouldTrigger = !longPressRef.current.hasTriggered && 
                                  longPressRef.current.startPosition &&
@@ -2766,6 +2778,7 @@ export default function Home() {
             setHandDetectionMode('pencil');
             setIsHandDetectionEnabled(false);
             setFingerTipPosition(null);
+            setFingerTipUv(null);
             // setDebugInfo('Switched to Apple Pencil mode');
           }}
           className={`px-3 py-1 rounded text-sm transition-colors ${
@@ -3580,6 +3593,13 @@ export default function Home() {
               }}
             />
           )}
+
+          <PressureInferenceOverlay
+            enabled={isHandDetectionEnabled && handDetectionMode === 'finger'}
+            videoRef={videoRef}
+            fingerTipPosition={fingerTipPosition}
+            fingerTipUv={fingerTipUv}
+          />
           
         </div>
         
