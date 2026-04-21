@@ -51,34 +51,8 @@ const CLASS_COLORS: Record<PredictionClass, { bar: string; badge: string; glow: 
   NoPress: { bar: "bg-emerald-500",badge: "bg-emerald-500 text-white",glow: "shadow-emerald-500/60" },
 };
 
-const MODEL_VARIANTS = {
-  legacy_64: {
-    file: "/pressure_cnn_postChange.onnx",
-    inputSize: 64,
-    label: "pressure_cnn_postChange.onnx",
-  },
-  wei300_crop180_only: {
-    file: "/pressure_cnn_wei300_crop180_only.onnx",
-    inputSize: 180,
-    label: "pressure_cnn_wei300_crop180_only.onnx",
-  },
-  wei420_plus_half_wei300_crop180: {
-    file: "/pressure_cnn_wei420_plus_half_wei300_crop180.onnx",
-    inputSize: 180,
-    label: "pressure_cnn_wei420_plus_half_wei300_crop180.onnx",
-  },
-} as const;
-type ModelVariantKey = keyof typeof MODEL_VARIANTS;
-
-// Change this one line when testing a different exported model.
-const ACTIVE_MODEL: ModelVariantKey = "wei300_crop180_only";
-// const ACTIVE_MODEL: ModelVariantKey = "wei420_plus_half_wei300_crop180";
-const ACTIVE_MODEL_CONFIG = MODEL_VARIANTS[ACTIVE_MODEL];
-const IMG_SIZE = ACTIVE_MODEL_CONFIG.inputSize;
-const MODEL_PATH = ACTIVE_MODEL_CONFIG.file;
-const MODEL_LABEL = ACTIVE_MODEL_CONFIG.label;
-// Tuned for the newer device so fingertip scale matches the Wei_4-20 dataset better.
-const PATCH_SIZE_PX = 180;
+const IMG_SIZE = 64;
+const PATCH_SIZE_PX = 224;
 const INFER_HZ = 10; // run inference N times per second
 const TIP_V_COMPENSATION = 0.0001;
 
@@ -183,7 +157,7 @@ export default function PressureInference() {
     const pCtx = patch.getContext("2d")!;
     pCtx.drawImage(video, sx, sy, PATCH_SIZE_PX, PATCH_SIZE_PX, 0, 0, PATCH_SIZE_PX, PATCH_SIZE_PX);
 
-    // Resize to the selected model input size.
+    // Resize to 64x64 (model input size)
     resize.width  = IMG_SIZE;
     resize.height = IMG_SIZE;
     const rCtx = resize.getContext("2d")!;
@@ -193,7 +167,7 @@ export default function PressureInference() {
     const debugCanvas = document.getElementById("debug-resize") as HTMLCanvasElement;
     if (debugCanvas) {
       const dCtx = debugCanvas.getContext("2d")!;
-      dCtx.drawImage(resize, 0, 0, IMG_SIZE, IMG_SIZE);
+      dCtx.drawImage(resize, 0, 0, 64, 64);
 }
 
     // Convert to tensor
@@ -244,7 +218,7 @@ export default function PressureInference() {
           "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
         // 2. Load ONNX model from /public
-        const session = await ort.InferenceSession.create(MODEL_PATH);
+        const session = await ort.InferenceSession.create("/pressure_cnn_postChange.onnx");
         if (cancelled) return;
         ortRef.current = session;
 
@@ -395,8 +369,8 @@ export default function PressureInference() {
               {/* Debug: show what model sees */} {/* Can be removed in production */}
               <canvas
                 id="debug-resize"
-                width={IMG_SIZE}
-                height={IMG_SIZE}
+                width={64}
+                height={64}
                 className="absolute bottom-2 left-2 border-2 border-yellow-400"
                 style={{ width: 128, height: 128, imageRendering: "pixelated" }}
               />
@@ -485,7 +459,7 @@ export default function PressureInference() {
             {/* Stats */}
             <div className="rounded border border-gray-200 bg-gray-50 px-2 py-2 text-[11px] text-gray-700 flex flex-col gap-1 mt-auto">
               <div className="font-medium mb-1">Info</div>
-              <div>Model: <span className="font-mono">{MODEL_LABEL}</span></div>
+              <div>Model: <span className="font-mono">pressure_cnn_postChange.onnx</span></div>
               <div>Input: <span className="font-mono">{IMG_SIZE}×{IMG_SIZE} RGB</span></div>
               <div>Inference: <span className="font-mono">{INFER_HZ}Hz</span></div>
               <div>Runtime: <span className="font-mono">onnxruntime-web (WebGL)</span></div>
