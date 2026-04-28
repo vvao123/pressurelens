@@ -7,6 +7,7 @@ import {
   type FingertipUv,
   type PressurePredictionClass,
 } from "../lib/inference/usePressureInference";
+import { DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG } from "../lib/inference/pressureInferenceConfig";
 
 type ScreenPoint = {
   x: number;
@@ -19,8 +20,6 @@ type PressureInferenceOverlayProps = {
   fingerTipPosition: ScreenPoint | null;
   fingerTipUv: FingertipUv | null;
 };
-
-const MODEL_NAME = "pressure_cnn_v1.onnx";
 
 const CLASS_COLORS: Record<
   PressurePredictionClass,
@@ -49,6 +48,7 @@ export default function PressureInferenceOverlay({
   fingerTipPosition,
   fingerTipUv,
 }: PressureInferenceOverlayProps) {
+  const modelConfig = DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG;
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const { status, error, prediction, confidences, inferMs } =
     usePressureInference({
@@ -56,6 +56,7 @@ export default function PressureInferenceOverlay({
       videoRef,
       fingerTipUv,
       previewCanvasRef,
+      modelConfig,
     });
 
   if (!enabled) {
@@ -92,8 +93,8 @@ export default function PressureInferenceOverlay({
         </div>
         <canvas
           ref={previewCanvasRef}
-          width={64}
-          height={64}
+          width={modelConfig.inputSizePx}
+          height={modelConfig.inputSizePx}
           className="block border border-yellow-300/70"
           style={{
             width: "96px",
@@ -101,10 +102,12 @@ export default function PressureInferenceOverlay({
             imageRendering: "pixelated",
           }}
         />
-        <div className="mt-1 text-[10px] text-white/55">64x64 RGB</div>
+        <div className="mt-1 text-[10px] text-white/55">
+          {modelConfig.inputSizePx}x{modelConfig.inputSizePx} RGB
+        </div>
       </div>
 
-      <div className="absolute right-3 top-3 z-30 w-44 overflow-hidden rounded-xl border border-white/10 bg-black/65 text-white shadow-xl backdrop-blur-sm pointer-events-none">
+      <div className="absolute right-3 top-3 z-30 w-56 overflow-hidden rounded-xl border border-white/10 bg-black/65 text-white shadow-xl backdrop-blur-sm pointer-events-none">
         <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
           <div className="text-[10px] uppercase tracking-[0.18em] text-white/50">
             Pressure
@@ -151,9 +154,18 @@ export default function PressureInferenceOverlay({
             }
           )}
 
+          <div className="space-y-1 text-[10px] text-white/55">
+            <div>Model</div>
+            <div className="break-all font-mono text-white/70">
+              {modelConfig.modelName}
+            </div>
+          </div>
+
           <div className="flex items-center justify-between text-[10px] text-white/55">
-            <span>Model</span>
-            <span className="font-mono">{MODEL_NAME}</span>
+            <span>Patch</span>
+            <span className="font-mono">
+              {modelConfig.cropSizePx}px to {modelConfig.inputSizePx}px
+            </span>
           </div>
 
           <div className="flex items-center justify-between text-[10px] text-white/55">

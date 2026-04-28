@@ -2,6 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
+import {
+  DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG,
+  PRESSURE_INFERENCE_DEFAULT_INFER_HZ,
+  type PressureInferenceModelConfig,
+} from "./pressureInferenceConfig";
 
 export type PressurePredictionClass = "Firm" | "Light" | "NoPress";
 
@@ -34,7 +39,7 @@ export type UsePressureInferenceOptions = {
   videoRef: RefObject<HTMLVideoElement | null>;
   fingerTipUv: FingertipUv | null;
   previewCanvasRef?: RefObject<HTMLCanvasElement | null>;
-  modelPath?: string;
+  modelConfig?: PressureInferenceModelConfig;
   inferHz?: number;
 };
 
@@ -47,10 +52,6 @@ export type UsePressureInferenceResult = {
 };
 
 const CLASS_NAMES: PressurePredictionClass[] = ["Firm", "Light", "NoPress"];
-const DEFAULT_MODEL_PATH = "/pressure_cnn_v1.onnx";
-const DEFAULT_INFER_HZ = 10;
-const IMG_SIZE = 64;
-const PATCH_SIZE_PX = 224;
 const ORT_SCRIPT_SRC = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js";
 const ORT_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
@@ -101,22 +102,25 @@ function softmax(logits: Float32Array): number[] {
   return exps.map((value) => value / sum);
 }
 
-function imageDataToTensor(canvas: HTMLCanvasElement): Float32Array {
+function imageDataToTensor(
+  canvas: HTMLCanvasElement,
+  inputSizePx: number
+): Float32Array {
   const ctx = canvas.getContext("2d");
   if (!ctx) {
     throw new Error("Could not read model input canvas.");
   }
 
-  const { data } = ctx.getImageData(0, 0, IMG_SIZE, IMG_SIZE);
-  const tensor = new Float32Array(3 * IMG_SIZE * IMG_SIZE);
+  const { data } = ctx.getImageData(0, 0, inputSizePx, inputSizePx);
+  const tensor = new Float32Array(3 * inputSizePx * inputSizePx);
   const mean = 0.5;
   const std = 0.5;
 
-  for (let index = 0; index < IMG_SIZE * IMG_SIZE; index += 1) {
+  for (let index = 0; index < inputSizePx * inputSizePx; index += 1) {
     tensor[index] = (data[index * 4] / 255 - mean) / std;
-    tensor[index + IMG_SIZE * IMG_SIZE] =
+    tensor[index + inputSizePx * inputSizePx] =
       (data[index * 4 + 1] / 255 - mean) / std;
-    tensor[index + IMG_SIZE * IMG_SIZE * 2] =
+    tensor[index + inputSizePx * inputSizePx * 2] =
       (data[index * 4 + 2] / 255 - mean) / std;
   }
 
@@ -128,10 +132,14 @@ export function usePressureInference({
   videoRef,
   fingerTipUv,
   previewCanvasRef,
-  modelPath = DEFAULT_MODEL_PATH,
-  inferHz = DEFAULT_INFER_HZ,
+  modelConfig = DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG,
+  inferHz = PRESSURE_INFERENCE_DEFAULT_INFER_HZ,
 }: UsePressureInferenceOptions): UsePressureInferenceResult {
+  const modelPath = modelConfig.modelPath;
+  const inputSizePx = modelConfig.inputSizePx;
+  const cropSizePx = modelConfig.cropSizePx;
   const sessionRef = useRef<OrtSession | null>(null);
+  const sessionModelPathRef = useRef<string | null>(null);
   const patchCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const resizeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -197,46 +205,48 @@ export function usePressureInference({
 
     const centerX = clamp(tip.u, 0, 1) * video.videoWidth;
     const centerY = clamp(tip.v, 0, 1) * video.videoHeight;
-    const halfPatch = PATCH_SIZE_PX / 2;
+    const halfPatch = cropSizePx / 2;
     const sourceX = clamp(
       Math.round(centerX - halfPatch),
       0,
-      Math.max(0, video.videoWidth - PATCH_SIZE_PX)
+      Math.max(0, video.videoWidth - cropSizePx)
     );
     const sourceY = clamp(
       Math.round(centerY - halfPatch),
       0,
-      Math.max(0, video.videoHeight - PATCH_SIZE_PX)
+      Math.max(0, video.videoHeight - cropSizePx)
     );
 
-    patchCanvas.width = PATCH_SIZE_PX;
-    patchCanvas.height = PATCH_SIZE_PX;
+    patchCanvas.width = cropSizePx;
+    patchCanvas.height = cropSizePx;
     patchCtx.drawImage(
       video,
       sourceX,
       sourceY,
-      PATCH_SIZE_PX,
-      PATCH_SIZE_PX,
+      cropSizePx,
+      cropSizePx,
       0,
       0,
-      PATCH_SIZE_PX,
-      PATCH_SIZE_PX
+      cropSizePx,
+      cropSizePx
     );
 
-    resizeCanvas.width = IMG_SIZE;
-    resizeCanvas.height = IMG_SIZE;
-    resizeCtx.drawImage(patchCanvas, 0, 0, IMG_SIZE, IMG_SIZE);
+    resizeCanvas.width = inputSizePx;
+    resizeCanvas.height = inputSizePx;
+    resizeCtx.drawImage(patchCanvas, 0, 0, inputSizePx, inputSizePx);
 
     const previewCanvas = previewCanvasRef?.current;
     const previewCtx = previewCanvas?.getContext("2d");
     if (previewCanvas && previewCtx) {
-      if (previewCanvas.width !== IMG_SIZE) previewCanvas.width = IMG_SIZE;
-      if (previewCanvas.height !== IMG_SIZE) previewCanvas.height = IMG_SIZE;
-      previewCtx.clearRect(0, 0, IMG_SIZE, IMG_SIZE);
-      previewCtx.drawImage(resizeCanvas, 0, 0, IMG_SIZE, IMG_SIZE);
+      if (previewCanvas.width !== inputSizePx) previewCanvas.width = inputSizePx;
+      if (previewCanvas.height !== inputSizePx) {
+        previewCanvas.height = inputSizePx;
+      }
+      previewCtx.clearRect(0, 0, inputSizePx, inputSizePx);
+      previewCtx.drawImage(resizeCanvas, 0, 0, inputSizePx, inputSizePx);
     }
 
-    const tensorData = imageDataToTensor(resizeCanvas);
+    const tensorData = imageDataToTensor(resizeCanvas, inputSizePx);
     const ort = (window as unknown as { ort?: OrtStatic }).ort;
     if (!ort) {
       return;
@@ -250,8 +260,8 @@ export function usePressureInference({
       const inputTensor = new ort.Tensor("float32", tensorData, [
         1,
         3,
-        IMG_SIZE,
-        IMG_SIZE,
+        inputSizePx,
+        inputSizePx,
       ]);
       const outputs = await session.run({ [inputName]: inputTensor });
       const outputTensor =
@@ -275,11 +285,15 @@ export function usePressureInference({
     } catch (inferenceError) {
       console.error("[PressureInference] inference failed:", inferenceError);
     }
-  }, [enabled, previewCanvasRef, videoRef]);
+  }, [cropSizePx, enabled, inputSizePx, previewCanvasRef, videoRef]);
 
   useEffect(() => {
     if (!enabled) {
-      setStatus(sessionRef.current ? "ready" : "idle");
+      setStatus(
+        sessionRef.current && sessionModelPathRef.current === modelPath
+          ? "ready"
+          : "idle"
+      );
       setError(null);
       return;
     }
@@ -287,7 +301,10 @@ export function usePressureInference({
     let cancelled = false;
 
     const boot = async () => {
-      if (sessionRef.current) {
+      if (
+        sessionRef.current &&
+        sessionModelPathRef.current === modelPath
+      ) {
         setStatus("ready");
         return;
       }
@@ -310,6 +327,7 @@ export function usePressureInference({
         }
 
         sessionRef.current = session;
+        sessionModelPathRef.current = modelPath;
         setStatus("ready");
       } catch (loadError) {
         if (cancelled) {

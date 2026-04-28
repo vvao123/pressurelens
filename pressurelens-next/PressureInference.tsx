@@ -2,6 +2,10 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
+import {
+  DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG,
+  PRESSURE_INFERENCE_DEFAULT_INFER_HZ,
+} from "./src/lib/inference/pressureInferenceConfig";
 
 // ─── Types (mirrored from collector) ──────────────────
 type TipUV = { u: number; v: number };
@@ -51,35 +55,12 @@ const CLASS_COLORS: Record<PredictionClass, { bar: string; badge: string; glow: 
   NoPress: { bar: "bg-emerald-500",badge: "bg-emerald-500 text-white",glow: "shadow-emerald-500/60" },
 };
 
-const MODEL_VARIANTS = {
-  legacy_64: {
-    file: "/pressure_cnn_postChange.onnx",
-    inputSize: 64,
-    label: "pressure_cnn_postChange.onnx",
-  },
-  wei300_crop180_only: {
-    file: "/pressure_cnn_wei300_crop180_only.onnx",
-    inputSize: 180,
-    label: "pressure_cnn_wei300_crop180_only.onnx",
-  },
-  wei420_plus_half_wei300_crop180: {
-    file: "/pressure_cnn_wei420_plus_half_wei300_crop180.onnx",
-    inputSize: 180,
-    label: "pressure_cnn_wei420_plus_half_wei300_crop180.onnx",
-  },
-} as const;
-type ModelVariantKey = keyof typeof MODEL_VARIANTS;
-
-// Change this one line when testing a different exported model.
-const ACTIVE_MODEL: ModelVariantKey = "wei300_crop180_only";
-// const ACTIVE_MODEL: ModelVariantKey = "wei420_plus_half_wei300_crop180";
-const ACTIVE_MODEL_CONFIG = MODEL_VARIANTS[ACTIVE_MODEL];
-const IMG_SIZE = ACTIVE_MODEL_CONFIG.inputSize;
-const MODEL_PATH = ACTIVE_MODEL_CONFIG.file;
-const MODEL_LABEL = ACTIVE_MODEL_CONFIG.label;
-// Tuned for the newer device so fingertip scale matches the Wei_4-20 dataset better.
-const PATCH_SIZE_PX = 180;
-const INFER_HZ = 10; // run inference N times per second
+const MODEL_CONFIG = DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG;
+const IMG_SIZE = MODEL_CONFIG.inputSizePx;
+const MODEL_PATH = MODEL_CONFIG.modelPath;
+const MODEL_LABEL = MODEL_CONFIG.modelName;
+const PATCH_SIZE_PX = MODEL_CONFIG.cropSizePx;
+const INFER_HZ = PRESSURE_INFERENCE_DEFAULT_INFER_HZ; // run inference N times per second
 const TIP_V_COMPENSATION = 0.0001;
 
 // ─── Helpers (same as collector) ──────────────────────
@@ -485,8 +466,9 @@ export default function PressureInference() {
             {/* Stats */}
             <div className="rounded border border-gray-200 bg-gray-50 px-2 py-2 text-[11px] text-gray-700 flex flex-col gap-1 mt-auto">
               <div className="font-medium mb-1">Info</div>
-              <div>Model: <span className="font-mono">{MODEL_LABEL}</span></div>
-              <div>Input: <span className="font-mono">{IMG_SIZE}×{IMG_SIZE} RGB</span></div>
+              <div>Model: <span className="font-mono break-all">{MODEL_LABEL}</span></div>
+              <div>Patch: <span className="font-mono">{PATCH_SIZE_PX}px crop</span></div>
+              <div>Input: <span className="font-mono">{IMG_SIZE}x{IMG_SIZE} RGB</span></div>
               <div>Inference: <span className="font-mono">{INFER_HZ}Hz</span></div>
               <div>Runtime: <span className="font-mono">onnxruntime-web (WebGL)</span></div>
               {inferMs !== null && (
