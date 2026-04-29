@@ -49,6 +49,12 @@ type OrtStatic = {
 const CLASS_NAMES = ["Firm", "Light", "NoPress"] as const;
 type PredictionClass = (typeof CLASS_NAMES)[number];
 
+const CLASS_DISPLAY_NAMES: Record<PredictionClass, string> = {
+  Firm: "Firm",
+  Light: "Light",
+  NoPress: "Normal",
+};
+
 const CLASS_COLORS: Record<PredictionClass, { bar: string; badge: string; glow: string }> = {
   Firm:    { bar: "bg-red-500",    badge: "bg-red-500 text-white",    glow: "shadow-red-500/60" },
   Light:   { bar: "bg-yellow-400", badge: "bg-yellow-400 text-black", glow: "shadow-yellow-400/60" },
@@ -388,7 +394,7 @@ export default function PressureInference() {
                   className={`absolute -translate-x-1/2 -translate-y-full -mt-4 px-4 py-1.5 rounded-full text-sm font-bold shadow-lg ${colors.badge} ${colors.glow}`}
                   style={{ left: tipForUI.x, top: tipForUI.y - 16 }}
                 >
-                  {prediction}
+                  {CLASS_DISPLAY_NAMES[prediction]}
                 </div>
               )}
 
@@ -430,7 +436,7 @@ export default function PressureInference() {
               <div className="text-sm font-medium">Prediction</div>
               {prediction && colors ? (
                 <div className={`text-2xl font-bold px-3 py-2 rounded-lg text-center ${colors.badge}`}>
-                  {prediction}
+                  {CLASS_DISPLAY_NAMES[prediction]}
                 </div>
               ) : (
                 <div className="text-2xl font-bold px-3 py-2 rounded-lg text-center bg-gray-100 text-gray-400">
@@ -449,7 +455,7 @@ export default function PressureInference() {
                 return (
                   <div key={cls} className="flex flex-col gap-1">
                     <div className="flex justify-between text-xs">
-                      <span className={isTop ? "font-semibold" : "text-gray-600"}>{cls}</span>
+                      <span className={isTop ? "font-semibold" : "text-gray-600"}>{CLASS_DISPLAY_NAMES[cls]}</span>
                       <span className={isTop ? "font-semibold" : "text-gray-500"}>{pct}%</span>
                     </div>
                     <div className="h-3 rounded-full bg-gray-100 overflow-hidden">
