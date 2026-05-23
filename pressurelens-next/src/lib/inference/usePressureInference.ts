@@ -7,6 +7,7 @@ import {
   PRESSURE_INFERENCE_DEFAULT_INFER_HZ,
   type PressureInferenceModelConfig,
 } from "./pressureInferenceConfig";
+import { drawPressurePatchFromVideo } from "./pressurePatch";
 
 export type PressurePredictionClass = "Firm" | "Light" | "NoPress";
 
@@ -56,10 +57,6 @@ const ORT_SCRIPT_SRC = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.mi
 const ORT_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
 
 let ortScriptPromise: Promise<void> | null = null;
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
-}
 
 async function loadOrtRuntime() {
   if (typeof window === "undefined") return;
@@ -197,39 +194,20 @@ export function usePressureInference({
 
     const patchCanvas = patchCanvasRef.current;
     const resizeCanvas = resizeCanvasRef.current;
-    const patchCtx = patchCanvas.getContext("2d");
     const resizeCtx = resizeCanvas.getContext("2d");
-    if (!patchCtx || !resizeCtx) {
+    if (!resizeCtx) {
       return;
     }
 
-    const centerX = clamp(tip.u, 0, 1) * video.videoWidth;
-    const centerY = clamp(tip.v, 0, 1) * video.videoHeight;
-    const halfPatch = cropSizePx / 2;
-    const sourceX = clamp(
-      Math.round(centerX - halfPatch),
-      0,
-      Math.max(0, video.videoWidth - cropSizePx)
-    );
-    const sourceY = clamp(
-      Math.round(centerY - halfPatch),
-      0,
-      Math.max(0, video.videoHeight - cropSizePx)
-    );
-
-    patchCanvas.width = cropSizePx;
-    patchCanvas.height = cropSizePx;
-    patchCtx.drawImage(
+    const patchRect = drawPressurePatchFromVideo(
       video,
-      sourceX,
-      sourceY,
-      cropSizePx,
-      cropSizePx,
-      0,
-      0,
-      cropSizePx,
+      tip,
+      patchCanvas,
       cropSizePx
     );
+    if (!patchRect) {
+      return;
+    }
 
     resizeCanvas.width = inputSizePx;
     resizeCanvas.height = inputSizePx;

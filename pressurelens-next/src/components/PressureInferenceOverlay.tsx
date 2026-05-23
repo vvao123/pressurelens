@@ -1,13 +1,21 @@
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 import {
   usePressureInference,
   type FingertipUv,
   type PressurePredictionClass,
 } from "../lib/inference/usePressureInference";
-import { DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG } from "../lib/inference/pressureInferenceConfig";
+import {
+  DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG,
+  type PressureInferenceModelConfig,
+} from "../lib/inference/pressureInferenceConfig";
+import {
+  PRESSURE_MODEL_UPDATED_EVENT,
+  PRESSURE_MODEL_USER_STORAGE_KEY,
+  buildPressureModelUrl,
+} from "../lib/inference/pressureModelRegistration";
 
 type ScreenPoint = {
   x: number;
@@ -19,6 +27,12 @@ type PressureInferenceOverlayProps = {
   videoRef: RefObject<HTMLVideoElement | null>;
   fingerTipPosition: ScreenPoint | null;
   fingerTipUv: FingertipUv | null;
+  onPrediction?: (snapshot: {
+    prediction: PressurePredictionClass | null;
+    confidences: Record<PressurePredictionClass, number>;
+    inferMs: number | null;
+    status: "idle" | "loading" | "ready" | "error";
+  }) => void;
 };
 
 const CLASS_COLORS: Record<
@@ -47,9 +61,44 @@ export default function PressureInferenceOverlay({
   videoRef,
   fingerTipPosition,
   fingerTipUv,
+  onPrediction,
 }: PressureInferenceOverlayProps) {
-  const modelConfig = DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG;
+  const [modelConfig, setModelConfig] = useState<PressureInferenceModelConfig>(
+    DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG
+  );
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const loadRegisteredModelConfig = () => {
+      const userId = window.localStorage
+        .getItem(PRESSURE_MODEL_USER_STORAGE_KEY)
+        ?.trim();
+
+      if (!userId) {
+        setModelConfig(DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG);
+        return;
+      }
+
+      setModelConfig({
+        ...DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG,
+        modelPath: buildPressureModelUrl(userId, Date.now()),
+        modelName: `registered:${userId}`,
+      });
+    };
+
+    loadRegisteredModelConfig();
+    window.addEventListener("storage", loadRegisteredModelConfig);
+    window.addEventListener(PRESSURE_MODEL_UPDATED_EVENT, loadRegisteredModelConfig);
+
+    return () => {
+      window.removeEventListener("storage", loadRegisteredModelConfig);
+      window.removeEventListener(
+        PRESSURE_MODEL_UPDATED_EVENT,
+        loadRegisteredModelConfig
+      );
+    };
+  }, []);
+
   const { status, error, prediction, confidences, inferMs } =
     usePressureInference({
       enabled,
@@ -58,6 +107,10 @@ export default function PressureInferenceOverlay({
       previewCanvasRef,
       modelConfig,
     });
+
+  useEffect(() => {
+    onPrediction?.({ prediction, confidences, inferMs, status });
+  }, [confidences, inferMs, onPrediction, prediction, status]);
 
   if (!enabled) {
     return null;

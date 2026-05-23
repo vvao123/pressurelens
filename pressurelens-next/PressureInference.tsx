@@ -6,6 +6,11 @@ import {
   DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG,
   PRESSURE_INFERENCE_DEFAULT_INFER_HZ,
 } from "./src/lib/inference/pressureInferenceConfig";
+import {
+  PRESSURE_CAMERA_CONSTRAINTS,
+  drawPressurePatchFromVideo,
+  normalizePressureFingertipUv,
+} from "./src/lib/inference/pressurePatch";
 
 // ─── Types (mirrored from collector) ──────────────────
 type TipUV = { u: number; v: number };
@@ -49,12 +54,6 @@ type OrtStatic = {
 const CLASS_NAMES = ["Firm", "Light", "NoPress"] as const;
 type PredictionClass = (typeof CLASS_NAMES)[number];
 
-const CLASS_DISPLAY_NAMES: Record<PredictionClass, string> = {
-  Firm: "Firm",
-  Light: "Light",
-  NoPress: "Normal",
-};
-
 const CLASS_COLORS: Record<PredictionClass, { bar: string; badge: string; glow: string }> = {
   Firm:    { bar: "bg-red-500",    badge: "bg-red-500 text-white",    glow: "shadow-red-500/60" },
   Light:   { bar: "bg-yellow-400", badge: "bg-yellow-400 text-black", glow: "shadow-yellow-400/60" },
@@ -67,13 +66,8 @@ const MODEL_PATH = MODEL_CONFIG.modelPath;
 const MODEL_LABEL = MODEL_CONFIG.modelName;
 const PATCH_SIZE_PX = MODEL_CONFIG.cropSizePx;
 const INFER_HZ = PRESSURE_INFERENCE_DEFAULT_INFER_HZ; // run inference N times per second
-const TIP_V_COMPENSATION = 0.0001;
 
 // ─── Helpers (same as collector) ──────────────────────
-function clamp(n: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, n));
-}
-
 async function loadScriptOnce(src: string) {
   if (typeof document === "undefined") return;
   const existed = Array.from(document.scripts).some((s) => s.src === src);
@@ -158,17 +152,9 @@ export default function PressureInference() {
     const patch  = patchRef.current;
     const resize = resizeRef.current;
 
-    // Crop patch around fingertip (same logic as collector)
-    const cx   = tip.u * video.videoWidth;
-    const cy   = tip.v * video.videoHeight;
-    const half = PATCH_SIZE_PX / 2;
-    const sx   = clamp(Math.round(cx - half), 0, Math.max(0, video.videoWidth  - PATCH_SIZE_PX));
-    const sy   = clamp(Math.round(cy - half), 0, Math.max(0, video.videoHeight - PATCH_SIZE_PX));
-
-    patch.width  = PATCH_SIZE_PX;
-    patch.height = PATCH_SIZE_PX;
-    const pCtx = patch.getContext("2d")!;
-    pCtx.drawImage(video, sx, sy, PATCH_SIZE_PX, PATCH_SIZE_PX, 0, 0, PATCH_SIZE_PX, PATCH_SIZE_PX);
+    // Crop patch around fingertip (same shared logic as main page + registration).
+    const patchRect = drawPressurePatchFromVideo(video, tip, patch, PATCH_SIZE_PX);
+    if (!patchRect) return;
 
     // Resize to the selected model input size.
     resize.width  = IMG_SIZE;
@@ -237,12 +223,7 @@ export default function PressureInference() {
 
         // 3. Start camera
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: "user" },
-            width:  { ideal: 1920, min: 1280 },
-            height: { ideal: 1080, min: 720 },
-            frameRate: { ideal: 30, min: 15 },
-          },
+          video: PRESSURE_CAMERA_CONSTRAINTS,
           audio: false,
         });
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
@@ -279,9 +260,8 @@ export default function PressureInference() {
             return;
           }
 
-          const u0 = clamp(tip.x, 0, 1);
-          const v  = clamp(tip.y * (1 - TIP_V_COMPENSATION), 0, 1);
-          latestTipRef.current = { u: u0, v };
+          const pressureTip = normalizePressureFingertipUv(tip);
+          latestTipRef.current = pressureTip;
           setIsHandDetected(true);
 
           // Map to screen coords for the dot overlay
@@ -295,8 +275,8 @@ export default function PressureInference() {
             const dh = video.videoHeight * scale;
             const ox = (cw - dw) / 2;
             const oy = (ch - dh) / 2;
-            const x  = u0 * dw + ox;
-            const y  = v   * dh + oy - 0.02 * tip.y * ch;
+            const x  = pressureTip.u * dw + ox;
+            const y  = pressureTip.v * dh + oy - 0.02 * tip.y * ch;
             setTipForUI({ x, y });
           }
         });
@@ -394,7 +374,7 @@ export default function PressureInference() {
                   className={`absolute -translate-x-1/2 -translate-y-full -mt-4 px-4 py-1.5 rounded-full text-sm font-bold shadow-lg ${colors.badge} ${colors.glow}`}
                   style={{ left: tipForUI.x, top: tipForUI.y - 16 }}
                 >
-                  {CLASS_DISPLAY_NAMES[prediction]}
+                  {prediction}
                 </div>
               )}
 
@@ -436,7 +416,7 @@ export default function PressureInference() {
               <div className="text-sm font-medium">Prediction</div>
               {prediction && colors ? (
                 <div className={`text-2xl font-bold px-3 py-2 rounded-lg text-center ${colors.badge}`}>
-                  {CLASS_DISPLAY_NAMES[prediction]}
+                  {prediction}
                 </div>
               ) : (
                 <div className="text-2xl font-bold px-3 py-2 rounded-lg text-center bg-gray-100 text-gray-400">
@@ -455,7 +435,7 @@ export default function PressureInference() {
                 return (
                   <div key={cls} className="flex flex-col gap-1">
                     <div className="flex justify-between text-xs">
-                      <span className={isTop ? "font-semibold" : "text-gray-600"}>{CLASS_DISPLAY_NAMES[cls]}</span>
+                      <span className={isTop ? "font-semibold" : "text-gray-600"}>{cls}</span>
                       <span className={isTop ? "font-semibold" : "text-gray-500"}>{pct}%</span>
                     </div>
                     <div className="h-3 rounded-full bg-gray-100 overflow-hidden">
@@ -474,7 +454,7 @@ export default function PressureInference() {
               <div className="font-medium mb-1">Info</div>
               <div>Model: <span className="font-mono break-all">{MODEL_LABEL}</span></div>
               <div>Patch: <span className="font-mono">{PATCH_SIZE_PX}px crop</span></div>
-              <div>Input: <span className="font-mono">{IMG_SIZE}x{IMG_SIZE} RGB</span></div>
+              <div>Input: <span className="font-mono">{IMG_SIZE}×{IMG_SIZE} RGB</span></div>
               <div>Inference: <span className="font-mono">{INFER_HZ}Hz</span></div>
               <div>Runtime: <span className="font-mono">onnxruntime-web (WebGL)</span></div>
               {inferMs !== null && (

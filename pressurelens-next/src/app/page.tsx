@@ -1,5 +1,5 @@
 ﻿"use client";
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { createWorker, Worker } from "tesseract.js";
 import { recognizeWordsFromCanvas, WordBBox } from "../lib/ocr/tesseract";
 import * as THREE from "three";
@@ -9,8 +9,18 @@ import type { PointerSampleInput, VoiceAnnotation, NearestWordInfo } from "../li
 import PressureInferenceOverlay from "../components/PressureInferenceOverlay";
 import VoiceTopicRecorder from "../components/VoiceTopicRecorder";
 import { useTopicRanking } from "../lib/topicRanking/useTopicRanking";
+import {
+  PRESSURE_MODEL_UPDATED_EVENT,
+  PRESSURE_MODEL_USER_STORAGE_KEY,
+} from "../lib/inference/pressureModelRegistration";
+import {
+  PRESSURE_CAMERA_CONSTRAINTS,
+  normalizePressureFingertipUv,
+} from "../lib/inference/pressurePatch";
+import type { PressurePredictionClass } from "../lib/inference/usePressureInference";
 
 type Level = "light" | "medium" | "hard";
+type PressureLlmContextMode = "auto" | "page" | "ondemand";
 
 const normalizeTopicKey = (text: string) => text.trim().toLowerCase();
 
@@ -84,6 +94,17 @@ export default function Home() {
   // Topics + voice notes panel open state
   const [isTopicsPanelOpen, setIsTopicsPanelOpen] = useState<boolean>(true);
   const [pageIndex, setPageIndex] = useState<number>(1);
+  const [pressureModelUserId, setPressureModelUserId] = useState<string>("");
+  const [pressureModelMessage, setPressureModelMessage] = useState<string>(
+    "pressure model: final13 base"
+  );
+  const [isPressureLlmEnabled, setIsPressureLlmEnabled] = useState<boolean>(true);
+  const [pressureLlmContextMode, setPressureLlmContextMode] =
+    useState<PressureLlmContextMode>("auto");
+  const [pressureInferenceClass, setPressureInferenceClass] =
+    useState<PressurePredictionClass | null>(null);
+  const [pressureRequestStatus, setPressureRequestStatus] =
+    useState<string>("pressure request: idle");
 
   const [webglScreenshot, setWebglScreenshot] = useState<string>(""); // WebGL screenshot result
 
@@ -158,6 +179,37 @@ export default function Home() {
     return `${prefix}${s.slice(start, end)}${suffix}`;
   };
 
+  const buildNearestWordContext = (nearest: NearestWordInfo | null): string => {
+    if (!nearest) return "";
+    const lines = nearest.lineContext?.linesText ?? [];
+    const lineIndex = nearest.lineContext?.bestLineIndex ?? -1;
+    const activeLine =
+      lineIndex >= 0 && lineIndex < lines.length
+        ? lines[lineIndex].join(" ").trim()
+        : "";
+    const prevLine =
+      lineIndex > 0 && lineIndex - 1 < lines.length
+        ? lines[lineIndex - 1].join(" ").trim()
+        : "";
+    const nextLine =
+      lineIndex >= 0 && lineIndex + 1 < lines.length
+        ? lines[lineIndex + 1].join(" ").trim()
+        : "";
+
+    return [
+      `nearest word: ${nearest.text}`,
+      prevLine ? `previous line: ${prevLine}` : "",
+      activeLine ? `current line: ${activeLine}` : "",
+      nextLine ? `next line: ${nextLine}` : "",
+    ].filter(Boolean).join("\n");
+  };
+
+  const compactForPrompt = (text: string, maxChars: number): string => {
+    const normalized = (text || "").replace(/\s+/g, " ").trim();
+    if (normalized.length <= maxChars) return normalized;
+    return `${normalized.slice(0, maxChars)}...`;
+  };
+
   // Data logging toggle
   const [isLoggingEnabled, setIsLoggingEnabled] = useState<boolean>(false);
   const [lastVoiceAnnotation, setLastVoiceAnnotation] = useState<VoiceAnnotation | null>(null);
@@ -169,6 +221,52 @@ export default function Home() {
   useEffect(() => {
     pushTopicRankingPointerSampleRef.current = pushTopicRankingPointerSample;
   }, [pushTopicRankingPointerSample]);
+
+  useEffect(() => {
+    const savedUserId =
+      window.localStorage.getItem(PRESSURE_MODEL_USER_STORAGE_KEY)?.trim() ?? "";
+    setPressureModelUserId(savedUserId);
+    setPressureModelMessage(
+      savedUserId
+        ? `pressure model: registered user ${savedUserId}`
+        : "pressure model: final13 base"
+    );
+  }, []);
+
+  const applyPressureModelUser = async () => {
+    const userId = pressureModelUserId.trim();
+
+    if (!userId) {
+      window.localStorage.removeItem(PRESSURE_MODEL_USER_STORAGE_KEY);
+      window.dispatchEvent(new Event(PRESSURE_MODEL_UPDATED_EVENT));
+      setPressureModelMessage("pressure model: final13 base");
+      return;
+    }
+
+    try {
+      setPressureModelMessage(`checking registered model for ${userId}...`);
+      const res = await fetch(
+        `/api/pressure-registration/status?userId=${encodeURIComponent(userId)}`,
+        { cache: "no-store" }
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error ?? "failed to check pressure model");
+      }
+      if (!data?.modelExists) {
+        setPressureModelMessage(`no registered ONNX found for ${userId}`);
+        return;
+      }
+
+      window.localStorage.setItem(PRESSURE_MODEL_USER_STORAGE_KEY, userId);
+      window.dispatchEvent(new Event(PRESSURE_MODEL_UPDATED_EVENT));
+      setPressureModelMessage(`pressure model: registered user ${userId}`);
+    } catch (error) {
+      setPressureModelMessage(
+        `model check failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  };
 
   const resetSessionForNewPage = () => {
     // Store carry-over tail for next page BEFORE resetting
@@ -377,6 +475,19 @@ export default function Home() {
   const currentPressureRef = useRef<number>(0);
   const levelRef = useRef<Level>('light');
   const currentInterestScoreRef = useRef<number>(0);
+  const nearestWordRef = useRef<NearestWordInfo | null>(null);
+  const isPressureLlmEnabledRef = useRef<boolean>(isPressureLlmEnabled);
+  const pressureRequestLockRef = useRef<boolean>(false);
+  const pressureInteractionActiveRef = useRef<boolean>(false);
+  const pressureTriggeredClassRef = useRef<Exclude<
+    PressurePredictionClass,
+    "NoPress"
+  > | null>(null);
+  const pressureLastTriggerAtRef = useRef<number>(0);
+  const pressureCandidateRef = useRef<{
+    prediction: PressurePredictionClass;
+    since: number;
+  } | null>(null);
 
   useEffect(() => {
     fingerTipPositionRef.current = fingerTipPosition;
@@ -409,6 +520,10 @@ export default function Home() {
   useEffect(() => {
     currentInterestScoreRef.current = currentInterestScore;
   }, [currentInterestScore]);
+
+  useEffect(() => {
+    isPressureLlmEnabledRef.current = isPressureLlmEnabled;
+  }, [isPressureLlmEnabled]);
   
   // Pointing data sampling (~10Hz): record fingertip position + nearest OCR word
   useEffect(() => {
@@ -481,10 +596,12 @@ export default function Home() {
         if (isLoggingEnabled) {
           sessionLogger.addPointerSample(sample);
         }
+        nearestWordRef.current = nearest;
         setDebugNearestWord(nearest);
       } else {
-        // No fingertip detected; skip logging
-        setDebugNearestWord({ text: "-1", bbox: { x: 0, y: 0, w: 0, h: 0 }, distance: Infinity });
+        // No fingertip detected; skip logging and keep nearest word semantic-free.
+        nearestWordRef.current = null;
+        setDebugNearestWord(null);
       }
 
       timer = window.setTimeout(tick, intervalMs);
@@ -849,14 +966,7 @@ export default function Home() {
     (async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { 
-            facingMode: { ideal: "user" },
-            width: { ideal: 19200, min: 1280 },
-            height: { ideal: 10800, min: 720 },
-            frameRate: { ideal: 30, min: 15 },
-            // Add more constraints for better quality
-             aspectRatio: { ideal: 1 }
-          }, 
+          video: PRESSURE_CAMERA_CONSTRAINTS,
           audio: false,
         });
         const v = videoRef.current!;
@@ -1393,10 +1503,7 @@ export default function Home() {
                 return;
               }
               let { x, y } = projected;
-              setFingerTipUv({
-                u: Math.min(1, Math.max(0, fingerTip.x)),
-                v: Math.min(1, Math.max(0, fingerTip.y)),
-              });
+              setFingerTipUv(normalizePressureFingertipUv(fingerTip));
 
               // Visual compensation for lower fingertip:
               // - MediaPipe fingerTip.y is 0~1 (0=top, 1=bottom)
@@ -1897,6 +2004,237 @@ export default function Home() {
       height: areaHeight
     };
   };
+
+  const requestPressureLlm = useCallback(async (
+    prediction: Exclude<PressurePredictionClass, "NoPress">,
+    confidences?: Record<PressurePredictionClass, number>
+  ) => {
+    if (pressureRequestLockRef.current) return;
+
+    const pointer = fingerTipPositionRef.current;
+    if (!pointer) {
+      setPressureRequestStatus("pressure request: no fingertip");
+      return;
+    }
+
+    pressureRequestLockRef.current = true;
+    const requestLevel: Level = prediction === "Firm" ? "hard" : "light";
+    const nearest = nearestWordRef.current;
+    const nearestContext = buildNearestWordContext(nearest);
+    const basePageText = compactForPrompt(regionRecognizedText, 2400);
+    const topicsForPrompt = (
+      topRankedTopics.length > 0
+        ? topRankedTopics.map((topic) => topic.text)
+        : (regionTopics ?? [])
+    ).slice(0, 8);
+
+    let focusedText = "";
+    let focusedImage = "";
+    let contextSource = basePageText ? "page OCR" : "none";
+
+    try {
+      setPressureRequestStatus(`pressure request: ${prediction} detected`);
+      setAnswer(
+        prediction === "Light"
+          ? "pressure request: Light -> brief answer"
+          : "pressure request: Firm -> detailed answer"
+      );
+      setFloatingResponse({
+        text: "Thinking...",
+        position: { x: pointer.x, y: pointer.y - 18 },
+      });
+
+      const shouldRunOnDemandOcr =
+        pressureLlmContextMode === "ondemand" ||
+        (pressureLlmContextMode === "auto" && !basePageText);
+
+      if (shouldRunOnDemandOcr && videoReady && ocrReady && worker) {
+        const area = calculateFingerSelectionArea(pointer);
+        setSelectionBounds(area);
+        const isIPad =
+          /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+          (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+        const scale = isIPad ? 1.5 : 2;
+        const cropCanvas =
+          captureWYSIWYGRegionHiRes(area, scale) || captureWYSIWYGRegion(area);
+
+        if (cropCanvas) {
+          if (isEnhancementEnabled) {
+            const ctx2d = cropCanvas.getContext("2d");
+            if (ctx2d) {
+              const imageData = ctx2d.getImageData(
+                0,
+                0,
+                cropCanvas.width,
+                cropCanvas.height
+              );
+              const data = imageData.data;
+              for (let i = 0; i < data.length; i += 4) {
+                const gray =
+                  0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                const enhanced = Math.max(
+                  0,
+                  Math.min(255, 1.5 * (gray - 128) + 128 + 20)
+                );
+                const bw = enhanced > 128 ? 255 : 0;
+                data[i] = bw;
+                data[i + 1] = bw;
+                data[i + 2] = bw;
+              }
+              ctx2d.putImageData(imageData, 0, 0);
+            }
+          }
+
+          focusedImage = cropCanvas.toDataURL("image/png");
+          setCapturedImage(focusedImage);
+          const {
+            data: { text },
+          } = await worker.recognize(cropCanvas);
+          focusedText = text.trim().slice(0, 700);
+          if (focusedText) {
+            contextSource = "on-demand OCR";
+          }
+        }
+      }
+
+      const prompt = [
+        "You are an AR reading assistant for finger-based paper reading.",
+        "NoPress means normal reading and is ignored by the client. This request was intentionally triggered by pressure.",
+        prediction === "Light"
+          ? "Interaction: Light press. Give a brief, direct answer in 1-2 sentences."
+          : "Interaction: Firm press. Give a more detailed answer with the reasoning needed to understand the pointed context.",
+        "",
+        `Pressure confidence: Firm ${(confidences?.Firm ?? 0).toFixed(2)}, Light ${(confidences?.Light ?? 0).toFixed(2)}, NoPress ${(confidences?.NoPress ?? 0).toFixed(2)}`,
+        `Pointer: x=${pointer.x.toFixed(0)}, y=${pointer.y.toFixed(0)}`,
+        `Context source: ${contextSource}`,
+        nearestContext ? `Nearest-word context:\n${nearestContext}` : "Nearest-word context: unavailable; do not treat this as an error.",
+        focusedText ? `On-demand OCR near finger:\n${focusedText}` : "",
+        topicsForPrompt.length > 0
+          ? `Page topics/ranked focus candidates: ${topicsForPrompt.join(", ")}`
+          : "",
+        basePageText ? `Full-page OCR context:\n${basePageText}` : "",
+        "",
+        "If the local OCR is noisy, infer the likely concept from the page context and the pointed position.",
+        "If there is no enough context, ask one concise clarification question instead of hallucinating.",
+      ].filter(Boolean).join("\n");
+
+      const resp = await fetch("/api/llm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text:
+            focusedText ||
+            nearest?.text ||
+            topicsForPrompt[0] ||
+            basePageText.slice(0, 400) ||
+            "pointed reading context",
+          level: requestLevel,
+          image: focusedImage || undefined,
+          prompt,
+          streaming: false,
+          language: "en",
+        }),
+      });
+
+      if (!resp.ok) {
+        const errorText = await resp.text().catch(() => "");
+        throw new Error(errorText || `LLM API error: ${resp.status}`);
+      }
+
+      const data = await resp.json();
+      const content = data?.content || "No response";
+      setAnswer(`pressure ${prediction} request\n\n${content}`);
+      setFloatingResponse({
+        text: content,
+        position: { x: pointer.x, y: pointer.y - 18 },
+      });
+      setPressureRequestStatus(`pressure request: ${prediction} answered`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[PressureRequest] failed", error);
+      setAnswer(`pressure request error: ${message}`);
+      setFloatingResponse({
+        text: `Error: ${message}`,
+        position: { x: pointer.x, y: pointer.y - 18 },
+      });
+      setPressureRequestStatus(`pressure request failed: ${message}`);
+    } finally {
+      pressureRequestLockRef.current = false;
+    }
+  }, [
+    buildNearestWordContext,
+    calculateFingerSelectionArea,
+    captureWYSIWYGRegion,
+    captureWYSIWYGRegionHiRes,
+    compactForPrompt,
+    isEnhancementEnabled,
+    ocrReady,
+    pressureLlmContextMode,
+    regionRecognizedText,
+    regionTopics,
+    topRankedTopics,
+    videoReady,
+    worker,
+  ]);
+
+  const handlePressureInferenceSnapshot = useCallback((snapshot: {
+    prediction: PressurePredictionClass | null;
+    confidences: Record<PressurePredictionClass, number>;
+    inferMs: number | null;
+    status: "idle" | "loading" | "ready" | "error";
+  }) => {
+    setPressureInferenceClass(snapshot.prediction);
+
+    const prediction = snapshot.prediction;
+    if (!prediction || prediction === "NoPress") {
+      pressureCandidateRef.current = null;
+      pressureInteractionActiveRef.current = false;
+      pressureTriggeredClassRef.current = null;
+      if (prediction === "NoPress") {
+        setPressureRequestStatus("pressure request: normal reading");
+      }
+      return;
+    }
+
+    if (!isPressureLlmEnabledRef.current || snapshot.status !== "ready") {
+      return;
+    }
+
+    const confidence = snapshot.confidences[prediction] ?? 0;
+    const minConfidence = prediction === "Firm" ? 0.58 : 0.52;
+    if (confidence < minConfidence) {
+      return;
+    }
+
+    const now = Date.now();
+    const candidate = pressureCandidateRef.current;
+    if (!candidate || candidate.prediction !== prediction) {
+      pressureCandidateRef.current = { prediction, since: now };
+      return;
+    }
+
+    const stableMs = prediction === "Firm" ? 450 : 550;
+    if (now - candidate.since < stableMs) {
+      return;
+    }
+    const triggeredClass = pressureTriggeredClassRef.current;
+    if (triggeredClass === "Firm") {
+      return;
+    }
+    if (triggeredClass === "Light" && prediction === "Light") {
+      return;
+    }
+    const minTriggerGapMs =
+      triggeredClass === "Light" && prediction === "Firm" ? 650 : 1800;
+    if (now - pressureLastTriggerAtRef.current < minTriggerGapMs) {
+      return;
+    }
+
+    pressureInteractionActiveRef.current = true;
+    pressureTriggeredClassRef.current = prediction;
+    pressureLastTriggerAtRef.current = now;
+    void requestPressureLlm(prediction, snapshot.confidences);
+  }, [requestPressureLlm]);
 
 
 
@@ -2707,6 +3045,12 @@ export default function Home() {
         >
           download session package
         </button>
+        <a
+          href="/register-pressure"
+          className="ml-2 px-3 py-1 rounded text-xs border border-gray-300 text-gray-700 hover:bg-gray-50"
+        >
+          register pressure model
+        </a>
       </div>
 
       {/* Data logging toggle & basic stats */}
@@ -2736,6 +3080,41 @@ export default function Home() {
           })()}
         </div>
       
+      </div>
+
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+        <span className="text-gray-600">pressure model user:</span>
+        <input
+          value={pressureModelUserId}
+          onChange={(event) => setPressureModelUserId(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              void applyPressureModelUser();
+            }
+          }}
+          placeholder="user_id"
+          className="px-2 py-1 rounded border border-gray-300 text-sm"
+        />
+        <button
+          type="button"
+          onClick={() => void applyPressureModelUser()}
+          className="px-3 py-1 rounded text-xs bg-emerald-600 text-white hover:bg-emerald-700"
+        >
+          load user model
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setPressureModelUserId("");
+            window.localStorage.removeItem(PRESSURE_MODEL_USER_STORAGE_KEY);
+            window.dispatchEvent(new Event(PRESSURE_MODEL_UPDATED_EVENT));
+            setPressureModelMessage("pressure model: final13 base");
+          }}
+          className="px-3 py-1 rounded text-xs border border-gray-300 text-gray-700 hover:bg-gray-50"
+        >
+          base model
+        </button>
+        <span className="text-xs text-gray-500">{pressureModelMessage}</span>
       </div>
 
       
@@ -2857,6 +3236,36 @@ export default function Home() {
           {isFingerLongPressLLMEnabled
             ? "finger hold will auto OCR + LLM"
             : "no auto OCR/LLM on finger hold"}
+        </span>
+      </div>
+
+      <div className="mb-3 flex flex-wrap gap-2 items-center">
+        <span className="text-sm text-gray-600">pressure request LLM:</span>
+        <button
+          onClick={() => setIsPressureLlmEnabled((v) => !v)}
+          className={`px-3 py-1 rounded text-sm transition-colors ${
+            isPressureLlmEnabled
+              ? "bg-emerald-600 text-white"
+              : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+          }`}
+        >
+          {isPressureLlmEnabled ? "enabled" : "disabled"}
+        </button>
+        {(["auto", "page", "ondemand"] as PressureLlmContextMode[]).map((mode) => (
+          <button
+            key={mode}
+            onClick={() => setPressureLlmContextMode(mode)}
+            className={`px-2 py-1 rounded text-xs border ${
+              pressureLlmContextMode === mode
+                ? "border-emerald-500 bg-emerald-50 text-emerald-700"
+                : "border-gray-300 bg-white text-gray-600 hover:bg-gray-50"
+            }`}
+          >
+            {mode}
+          </button>
+        ))}
+        <span className="text-xs text-gray-500">
+          {pressureInferenceClass ?? "No Hand"} · {pressureRequestStatus}
         </span>
       </div>
 
@@ -3599,6 +4008,7 @@ export default function Home() {
             videoRef={videoRef}
             fingerTipPosition={fingerTipPosition}
             fingerTipUv={fingerTipUv}
+            onPrediction={handlePressureInferenceSnapshot}
           />
           
         </div>

@@ -1,10 +1,28 @@
-export const runtime = "edge";
+export const runtime = "nodejs";
 
 export async function POST(req: Request) {
   const { text, level, image, streaming = false, prompt: providedPrompt, language = "en" } = await req.json();
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  if (!OPENAI_API_KEY) {
-    return new Response(JSON.stringify({ error: 'OpenAI API key not configured.' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  const baseUrl = (
+    process.env.LOCAL_LLM_BASE_URL ||
+    process.env.LLM_BASE_URL ||
+    "https://api.openai.com/v1"
+  ).replace(/\/$/, "");
+  const apiKey =
+    process.env.LOCAL_LLM_API_KEY ||
+    process.env.LLM_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    "";
+  const model =
+    (image ? process.env.LOCAL_LLM_VISION_MODEL : "") ||
+    process.env.LOCAL_LLM_MODEL ||
+    process.env.LLM_MODEL ||
+    "gpt-4o-mini";
+
+  if (!apiKey && baseUrl.includes("api.openai.com")) {
+    return new Response(JSON.stringify({ error: "OpenAI API key not configured." }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   // Log the received image data for debugging
@@ -51,25 +69,45 @@ The content must be accurate and practical.`;
     messages.push({ role: "user", content: prompt });
   }
 
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  const r = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
+    headers,
     body: JSON.stringify({
-      model: image ? "gpt-4o-mini" : "gpt-4o-mini", // Use GPT-4o for vision capabilities
+      model,
       stream: streaming,
       messages: messages
     })
   });
 
+  if (!r.ok) {
+    const errorText = await r.text().catch(() => "");
+    return new Response(
+      JSON.stringify({
+        error: "Failed to call chat completions API.",
+        status: r.status,
+        detail: errorText,
+        baseUrl,
+        model,
+      }),
+      {
+        status: r.status,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
   if (streaming) {
     // Return streaming response
     return new Response(r.body, {
       headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Transfer-Encoding": "chunked"
+        "Content-Type": r.headers.get("Content-Type") || "text/plain; charset=utf-8",
       }
     });
   } else {

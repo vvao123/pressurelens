@@ -39,3 +39,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# pressure model datasets and generated artifacts
+/finetune/registration_datasets/
+/finetune/registered_models/
+/finetune/*.onnx
+/finetune/*.pth
+/finetune/*.pt
+/finetune/*.ckpt
+/finetune/*.safetensors

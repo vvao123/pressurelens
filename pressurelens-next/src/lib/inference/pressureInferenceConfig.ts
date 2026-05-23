@@ -6,8 +6,8 @@ export type PressureInferenceModelConfig = {
 };
 
 export const DEFAULT_PRESSURE_INFERENCE_MODEL_CONFIG = {
-  modelPath: "/pressure_cnn_1777337025269_566175_crop180_only.onnx",
-  modelName: "pressure_cnn_1777337025269_566175_crop180_only.onnx",
+  modelPath: "/api/pressure-model",
+  modelName: "final13_all_subjects_base_crop180.onnx",
   cropSizePx: 180,
   inputSizePx: 180,
 } as const satisfies PressureInferenceModelConfig;
